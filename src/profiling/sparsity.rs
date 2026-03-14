@@ -20,7 +20,7 @@ pub fn sparsity(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
         let casted = col.cast(&DataType::Float64)?;
         let series = casted.as_materialized_series();
         let ca = series.f64()?;
-        ca.iter().flatten().filter(|v| *v == 0.0).count()
+        ca.iter().flatten().filter(|v| *v == 0.0 || v.is_nan()).count()
     } else {
         let casted = col.cast(&DataType::String)?;
         let series = casted.as_materialized_series();
@@ -58,5 +58,12 @@ mod tests {
     fn test_sparsity_dense() {
         let df = df! { "x" => &[1.0f64, 2.0, 3.0] }.unwrap();
         assert!((sparsity(&df, "x").unwrap()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_sparsity_with_nan() {
+        let df = df! { "x" => &[Some(f64::NAN), Some(0.0f64), Some(1.0), None] }.unwrap();
+        // NaN(1) + zero(1) + null(1) out of 4 → 0.75
+        assert!((sparsity(&df, "x").unwrap() - 0.75).abs() < 1e-10);
     }
 }

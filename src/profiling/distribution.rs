@@ -53,4 +53,24 @@ mod tests {
         let df = df! { "x" => &[5.0f64, 5.0, 5.0, 5.0] }.unwrap();
         assert!((skewness(&df, "x").unwrap()).abs() < 1e-10);
     }
+
+    #[test]
+    fn test_skewness_with_nulls() {
+        let df = df! { "x" => &[Some(1.0f64), None, Some(2.0), Some(3.0), None, Some(4.0), Some(5.0)] }.unwrap();
+        // Non-null [1,2,3,4,5] is symmetric → skewness ≈ 0
+        assert!(skewness(&df, "x").unwrap().abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_skewness_with_nan() {
+        let df = df! { "x" => &[Some(1.0f64), Some(f64::NAN), Some(2.0), Some(3.0), Some(4.0), Some(5.0)] }.unwrap();
+        // NaN is skipped, same as [1,2,3,4,5]
+        assert!(skewness(&df, "x").unwrap().abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_skewness_all_null() {
+        let df = df! { "x" => &[Option::<f64>::None, None, None] }.unwrap();
+        assert!(skewness(&df, "x").is_err());
+    }
 }
