@@ -1,0 +1,47 @@
+{
+  "version": "0.2.0",
+  // Requires the CodeLLDB extension (vadimcn.vscode-lldb) for the lldb type.
+  // Install it via: ext install vadimcn.vscode-lldb
+  "configurations": [
+    {
+      "name": "Debug (mcp)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/debug/mcp",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build debug"
+    },
+    {
+      "name": "Release (mcp)",
+      "type": "lldb",
+      "request": "launch",
+      "program": "${workspaceFolder}/target/release/mcp",
+      "args": [],
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "cargo: build release"
+    },
+    {
+      "name": "Test (all) — debug in CodeLLDB",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--no-run", "--lib"],
+        "filter": { "kind": "lib" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "name": "Test integration — debug in CodeLLDB",
+      "type": "lldb",
+      "request": "launch",
+      "cargo": {
+        "args": ["test", "--no-run", "--test", "integration"],
+        "filter": { "kind": "test" }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}
