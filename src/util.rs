@@ -2,7 +2,7 @@ use polars::prelude::*;
 
 use crate::error::ProfilingError;
 
-/// Extract non-null, non-NaN f64 values from a numeric column.
+/// Extract f64 values from a numeric column.
 pub fn extract_f64_values(df: &DataFrame, column: &str) -> Result<Vec<f64>, ProfilingError> {
     let col = df
         .column(column)
@@ -13,7 +13,7 @@ pub fn extract_f64_values(df: &DataFrame, column: &str) -> Result<Vec<f64>, Prof
     let casted = col.cast(&DataType::Float64)?;
     let series = casted.as_materialized_series();
     let ca = series.f64()?;
-    Ok(ca.iter().flatten().filter(|v| !v.is_nan()).collect())
+    Ok(ca.into_no_null_iter().collect())
 }
 
 /// Names of all numeric columns in the dataframe.

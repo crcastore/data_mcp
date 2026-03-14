@@ -3,13 +3,13 @@ use polars::prelude::*;
 
 use mcp::dataset::Dataset;
 use mcp::profiling::{
-    categorical, correlation, distribution, entropy, missing, numeric, shape, sparsity,
+    categorical, correlation, distribution, entropy, missing, numeric, reservoir, shape, sparsity,
 };
 
 /// Build a 50-column × 10 000-row DataFrame.
 ///
-/// - Columns `num_00`..`num_39`  → random-ish Float64 (with ~5 % nulls)
-/// - Columns `cat_00`..`cat_09`  → Utf8 categories     (with ~5 % nulls)
+/// - Columns `num_00`..`num_39`  → random-ish Float64
+/// - Columns `cat_00`..`cat_09`  → Utf8 categories
 fn build_dataframe() -> DataFrame {
     const ROWS: usize = 10_000;
     const NUM_COLS: usize = 40;
@@ -23,15 +23,10 @@ fn build_dataframe() -> DataFrame {
     let mut seed: u64 = 42;
     for i in 0..NUM_COLS {
         let name = format!("num_{i:02}");
-        let mut vals: Vec<Option<f64>> = Vec::with_capacity(ROWS);
+        let mut vals: Vec<f64> = Vec::with_capacity(ROWS);
         for _ in 0..ROWS {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            // ~5 % nulls
-            if seed % 20 == 0 {
-                vals.push(None);
-            } else {
-                vals.push(Some((seed as f64) / u64::MAX as f64 * 1000.0));
-            }
+            vals.push((seed as f64) / u64::MAX as f64 * 1000.0);
         }
         let ca = Float64Chunked::new(name.into(), &vals);
         columns.push(ca.into_column());
@@ -40,14 +35,10 @@ fn build_dataframe() -> DataFrame {
     // Categorical (string) columns.
     for i in 0..CAT_COLS {
         let name = format!("cat_{i:02}");
-        let mut vals: Vec<Option<&str>> = Vec::with_capacity(ROWS);
+        let mut vals: Vec<&str> = Vec::with_capacity(ROWS);
         for _ in 0..ROWS {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            if seed % 20 == 0 {
-                vals.push(None);
-            } else {
-                vals.push(Some(categories[(seed % categories.len() as u64) as usize]));
-            }
+            vals.push(categories[(seed % categories.len() as u64) as usize]);
         }
         let ca = StringChunked::new(name.into(), &vals);
         columns.push(ca.into_column());
@@ -151,6 +142,48 @@ fn bench_dataset_from_dataframe(c: &mut Criterion) {
     });
 }
 
+fn bench_surrogate_test(c: &mut Criterion) {
+    let df = build_dataframe();
+    c.bench_function("reservoir::surrogate_test", |b| {
+        b.iter(|| reservoir::surrogate_test(black_box(&df), "num_00", 100).unwrap())
+    });
+}
+
+fn bench_bds_test(c: &mut Criterion) {
+    let df = build_dataframe();
+    c.bench_function("reservoir::bds_test", |b| {
+        b.iter(|| reservoir::bds_test(black_box(&df), "num_00", 3, 400.0).unwrap())
+    });
+}
+
+fn bench_lyapunov_exponent(c: &mut Criterion) {
+    let df = build_dataframe();
+    c.bench_function("reservoir::lyapunov_exponent", |b| {
+        b.iter(|| reservoir::lyapunov_exponent(black_box(&df), "num_00", 3, 1).unwrap())
+    });
+}
+
+fn bench_dependence_comparison(c: &mut Criterion) {
+    let df = build_dataframe();
+    c.bench_function("reservoir::dependence_comparison", |b| {
+        b.iter(|| reservoir::dependence_comparison(black_box(&df), "num_00", 10).unwrap())
+    });
+}
+
+fn bench_delay_embedding(c: &mut Criterion) {
+    let df = build_dataframe();
+    c.bench_function("reservoir::delay_embedding", |b| {
+        b.iter(|| reservoir::delay_embedding(black_box(&df), "num_00", 10).unwrap())
+    });
+}
+
+fn bench_memory_profile(c: &mut Criterion) {
+    let df = build_dataframe();
+    c.bench_function("reservoir::memory_profile", |b| {
+        b.iter(|| reservoir::memory_profile(black_box(&df), "num_00", 10).unwrap())
+    });
+}
+
 criterion_group!(
     benches,
     bench_row_count,
@@ -166,5 +199,11 @@ criterion_group!(
     bench_correlation_matrix,
     bench_sparsity,
     bench_dataset_from_dataframe,
+    bench_surrogate_test,
+    bench_bds_test,
+    bench_lyapunov_exponent,
+    bench_dependence_comparison,
+    bench_delay_embedding,
+    bench_memory_profile,
 );
 criterion_main!(benches);

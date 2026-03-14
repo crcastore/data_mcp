@@ -89,4 +89,56 @@ impl Dataset {
     pub fn sparsity(&self, column: &str) -> Result<f64, ProfilingError> {
         profiling::sparsity::sparsity(&self.df, column)
     }
+
+    // --- Reservoir Computing ---
+
+    pub fn surrogate_test(
+        &self,
+        column: &str,
+        num_surrogates: usize,
+    ) -> Result<profiling::reservoir::SurrogateTestResult, ProfilingError> {
+        profiling::reservoir::surrogate_test(&self.df, column, num_surrogates)
+    }
+
+    pub fn bds_test(
+        &self,
+        column: &str,
+        embedding_dim: usize,
+        epsilon: f64,
+    ) -> Result<profiling::reservoir::BdsTestResult, ProfilingError> {
+        profiling::reservoir::bds_test(&self.df, column, embedding_dim, epsilon)
+    }
+
+    pub fn lyapunov_exponent(
+        &self,
+        column: &str,
+        embedding_dim: usize,
+        tau: usize,
+    ) -> Result<f64, ProfilingError> {
+        profiling::reservoir::lyapunov_exponent(&self.df, column, embedding_dim, tau)
+    }
+
+    pub fn dependence_comparison(
+        &self,
+        column: &str,
+        max_lag: usize,
+    ) -> Result<profiling::reservoir::DependenceComparison, ProfilingError> {
+        profiling::reservoir::dependence_comparison(&self.df, column, max_lag)
+    }
+
+    pub fn delay_embedding(
+        &self,
+        column: &str,
+        max_dim: usize,
+    ) -> Result<profiling::reservoir::DelayEmbedding, ProfilingError> {
+        profiling::reservoir::delay_embedding(&self.df, column, max_dim)
+    }
+
+    pub fn memory_profile(
+        &self,
+        column: &str,
+        max_lag: usize,
+    ) -> Result<profiling::reservoir::MemoryProfile, ProfilingError> {
+        profiling::reservoir::memory_profile(&self.df, column, max_lag)
+    }
 }

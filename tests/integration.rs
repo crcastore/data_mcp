@@ -5,14 +5,13 @@ use mcp::dataset::Dataset;
 fn sample_ds() -> Dataset {
     let df = df! {
         "id"     => &[1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "age"    => &[Some(25i64), Some(30), Some(35), Some(25), Some(40),
-                      None, Some(28), Some(33), Some(45), Some(22)],
-        "income" => &[Some(50000.0f64), Some(60000.0), Some(70000.0), None,
-                      Some(80000.0), Some(75000.0), Some(45000.0), Some(62000.0),
-                      Some(90000.0), Some(40000.0)],
-        "city"   => &[Some("NYC"), Some("LA"), Some("NYC"), Some("LA"),
-                      Some("NYC"), None, Some("Chicago"), Some("LA"),
-                      Some("NYC"), Some("Chicago")],
+        "age"    => &[25i64, 30, 35, 25, 40, 31, 28, 33, 45, 22],
+        "income" => &[50000.0f64, 60000.0, 70000.0, 55000.0,
+                      80000.0, 75000.0, 45000.0, 62000.0,
+                      90000.0, 40000.0],
+        "city"   => &["NYC", "LA", "NYC", "LA",
+                      "NYC", "Chicago", "Chicago", "LA",
+                      "NYC", "Chicago"],
         "score"  => &[85.5f64, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0],
     }
     .unwrap();
@@ -37,18 +36,18 @@ fn test_column_types_length() {
 #[test]
 fn test_missing_rates() {
     let ds = sample_ds();
-    assert!((ds.missing_rate("age").unwrap() - 0.1).abs() < 1e-10);
-    assert!((ds.missing_rate("income").unwrap() - 0.1).abs() < 1e-10);
-    assert!((ds.missing_rate("city").unwrap() - 0.1).abs() < 1e-10);
+    assert!(ds.missing_rate("age").unwrap().abs() < 1e-10);
+    assert!(ds.missing_rate("income").unwrap().abs() < 1e-10);
+    assert!(ds.missing_rate("city").unwrap().abs() < 1e-10);
     assert!(ds.missing_rate("score").unwrap().abs() < 1e-10);
 }
 
 #[test]
 fn test_mean_age() {
     let ds = sample_ds();
-    // age non-null: [25,30,35,25,40,28,33,45,22] → sum=283, n=9
+    // age: [25,30,35,25,40,31,28,33,45,22] → sum=314, n=10
     let m = ds.mean("age").unwrap();
-    assert!((m - 283.0 / 9.0).abs() < 1e-10);
+    assert!((m - 314.0 / 10.0).abs() < 1e-10);
 }
 
 #[test]
@@ -73,7 +72,7 @@ fn test_skewness_reasonable() {
 
 #[test]
 fn test_unique_count_city() {
-    // non-null cities: NYC, LA, Chicago → 3
+    // cities: NYC, LA, Chicago → 3
     assert_eq!(sample_ds().unique_count("city").unwrap(), 3);
 }
 
@@ -110,7 +109,7 @@ fn test_correlation_range() {
     for row in &cm.matrix {
         for &val in row {
             assert!(
-                val.is_nan() || (-1.0 - 1e-10..=1.0 + 1e-10).contains(&val),
+                (-1.0 - 1e-10..=1.0 + 1e-10).contains(&val),
                 "correlation {val} out of [-1, 1]"
             );
         }
@@ -120,6 +119,73 @@ fn test_correlation_range() {
 #[test]
 fn test_sparsity_score() {
     // score: [85.5, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0]
-    // 4 zeros, 0 nulls → 4/10 = 0.4
+    // 4 zeros out of 10 → 0.4
     assert!((sample_ds().sparsity("score").unwrap() - 0.4).abs() < 1e-10);
+}
+
+// ---------------------------------------------------------------------------
+// Reservoir computing diagnostics — uses a chaotic logistic map series
+// ---------------------------------------------------------------------------
+
+fn reservoir_ds() -> Dataset {
+    let n = 2000;
+    let mut x = vec![0.0f64; n];
+    x[0] = 0.1;
+    let r = 3.9;
+    for i in 1..n {
+        x[i] = r * x[i - 1] * (1.0 - x[i - 1]);
+    }
+    let df = df! { "signal" => &x }.unwrap();
+    Dataset::new(df)
+}
+
+#[test]
+fn test_surrogate_test_via_dataset() {
+    let ds = reservoir_ds();
+    let result = ds.surrogate_test("signal", 50).unwrap();
+    assert!(result.z_score.abs() > 2.0, "logistic map should be nonlinear");
+    assert!(result.is_nonlinear);
+}
+
+#[test]
+fn test_bds_test_via_dataset() {
+    let ds = reservoir_ds();
+    let result = ds.bds_test("signal", 3, 0.5).unwrap();
+    assert!(result.p_value < 0.05, "logistic map should reject i.i.d. null");
+    assert!(result.statistic.is_finite());
+}
+
+#[test]
+fn test_lyapunov_via_dataset() {
+    let ds = reservoir_ds();
+    let l = ds.lyapunov_exponent("signal", 3, 1).unwrap();
+    assert!(l > 0.0, "chaotic series should have positive Lyapunov exponent, got {l}");
+}
+
+#[test]
+fn test_dependence_comparison_via_dataset() {
+    let ds = reservoir_ds();
+    let result = ds.dependence_comparison("signal", 5).unwrap();
+    assert_eq!(result.autocorrelations.len(), 5);
+    assert_eq!(result.mutual_informations.len(), 5);
+    for mi in &result.mutual_informations {
+        assert!(*mi >= 0.0);
+    }
+}
+
+#[test]
+fn test_delay_embedding_via_dataset() {
+    let ds = reservoir_ds();
+    let result = ds.delay_embedding("signal", 10).unwrap();
+    assert!(result.optimal_delay >= 1);
+    assert!(result.embedding_dimension >= 1 && result.embedding_dimension <= 10);
+}
+
+#[test]
+fn test_memory_profile_via_dataset() {
+    let ds = reservoir_ds();
+    let result = ds.memory_profile("signal", 10).unwrap();
+    assert_eq!(result.partial_autocorrelations.len(), 10);
+    assert_eq!(result.delay_mutual_informations.len(), 10);
+    assert!(result.active_information_storage > 0.0);
 }

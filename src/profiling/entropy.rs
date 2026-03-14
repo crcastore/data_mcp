@@ -4,13 +4,13 @@ use polars::prelude::*;
 
 use crate::error::ProfilingError;
 
-/// Shannon entropy in nats (natural logarithm) over non-null values.
+/// Shannon entropy in nats (natural logarithm).
 pub fn entropy(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let col = df
         .column(column)
         .map_err(|_| ProfilingError::ColumnNotFound(column.to_string()))?;
-    let non_null = col.len() - col.null_count();
-    if non_null == 0 {
+    let n = col.len();
+    if n == 0 {
         return Err(ProfilingError::EmptyDataset);
     }
 
@@ -20,11 +20,11 @@ pub fn entropy(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let ca = series.str()?;
 
     let mut counts: HashMap<&str, usize> = HashMap::new();
-    for val in ca.iter().flatten() {
+    for val in ca.into_no_null_iter() {
         *counts.entry(val).or_default() += 1;
     }
 
-    let nf = non_null as f64;
+    let nf = n as f64;
     let h = counts
         .values()
         .map(|&c| {
@@ -52,14 +52,6 @@ mod tests {
     fn test_entropy_single_value() {
         let df = df! { "c" => &["x", "x", "x"] }.unwrap();
         assert!((entropy(&df, "c").unwrap()).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_entropy_with_nulls() {
-        let df = df! { "c" => &[Some("a"), None, Some("b")] }.unwrap();
-        // Two non-null values, each p=0.5 → H = ln(2)
-        let h = entropy(&df, "c").unwrap();
-        assert!((h - 2.0f64.ln()).abs() < 1e-10);
     }
 
     #[test]

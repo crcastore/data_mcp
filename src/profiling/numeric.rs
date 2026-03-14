@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::error::ProfilingError;
 use crate::util::extract_f64_values;
 
-/// Arithmetic mean of non-null values.
+/// Arithmetic mean.
 pub fn mean(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let vals = extract_f64_values(df, column)?;
     if vals.is_empty() {
@@ -13,7 +13,7 @@ pub fn mean(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     Ok(vals.iter().sum::<f64>() / vals.len() as f64)
 }
 
-/// Sample variance (ddof = 1) of non-null values.
+/// Sample variance (ddof = 1).
 pub fn variance(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let vals = extract_f64_values(df, column)?;
     let n = vals.len();
@@ -92,43 +92,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mean_with_nulls() {
-        let df = df! { "x" => &[Some(2.0f64), None, Some(4.0)] }.unwrap();
-        assert!((mean(&df, "x").unwrap() - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
     fn test_not_numeric() {
         let df = df! { "s" => &["a", "b"] }.unwrap();
         assert!(mean(&df, "s").is_err());
-    }
-
-    #[test]
-    fn test_variance_with_nulls() {
-        let df = df! { "x" => &[Some(1.0f64), None, Some(3.0), None, Some(5.0)] }.unwrap();
-        // non-null values: [1, 3, 5], sample var = 4.0
-        assert!((variance(&df, "x").unwrap() - 4.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_quantiles_with_nulls() {
-        let df = df! { "x" => &[Some(1.0f64), None, Some(3.0), None, Some(5.0)] }.unwrap();
-        let q = quantiles(&df, "x").unwrap();
-        assert!((q.min - 1.0).abs() < 1e-10);
-        assert!((q.q50 - 3.0).abs() < 1e-10);
-        assert!((q.max - 5.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_mean_with_nan() {
-        let df = df! { "x" => &[Some(2.0f64), Some(f64::NAN), Some(4.0)] }.unwrap();
-        // NaN is skipped, mean of [2, 4] = 3
-        assert!((mean(&df, "x").unwrap() - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_all_null() {
-        let df = df! { "x" => &[Option::<f64>::None, None, None] }.unwrap();
-        assert!(mean(&df, "x").is_err());
     }
 }

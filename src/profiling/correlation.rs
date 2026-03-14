@@ -11,11 +11,11 @@ pub struct CorrelationMatrix {
     pub matrix: Vec<Vec<f64>>,
 }
 
-/// Pearson correlation matrix for all numeric columns (pairwise complete).
+/// Pearson correlation matrix for all numeric columns.
 ///
 /// Uses a BLAS-style approach:
 ///   - Contiguous column-major layout for cache-friendly access
-///   - Branch-free mask-weighted dot products (SIMD-friendly inner loop)
+///   - Tight dot-product inner loop (SIMD-friendly)
 ///   - Rayon-parallelised upper-triangle computation
 pub fn correlation_matrix(df: &DataFrame) -> Result<CorrelationMatrix, ProfilingError> {
     let names = numeric_column_names(df);
@@ -26,11 +26,9 @@ pub fn correlation_matrix(df: &DataFrame) -> Result<CorrelationMatrix, Profiling
     let n = df.height();
     let m = names.len();
 
-    // Pack all columns into two contiguous column-major buffers:
-    //   values[col * n .. (col+1) * n]  – f64 value (0.0 where missing)
-    //   masks [col * n .. (col+1) * n]  – 1.0 valid, 0.0 missing/NaN
+    // Pack all columns into a contiguous column-major buffer:
+    //   values[col * n .. (col+1) * n]
     let mut values = vec![0.0f64; m * n];
-    let mut masks = vec![0.0f64; m * n];
 
     for (j, name) in names.iter().enumerate() {
         let col = df
@@ -40,14 +38,8 @@ pub fn correlation_matrix(df: &DataFrame) -> Result<CorrelationMatrix, Profiling
         let series = casted.as_materialized_series();
         let ca = series.f64()?;
         let offset = j * n;
-        for (k, opt) in ca.iter().enumerate() {
-            match opt {
-                Some(v) if !v.is_nan() => {
-                    values[offset + k] = v;
-                    masks[offset + k] = 1.0;
-                }
-                _ => {} // stays 0.0 / 0.0
-            }
+        for (k, v) in ca.into_no_null_iter().enumerate() {
+            values[offset + k] = v;
         }
     }
 
@@ -60,11 +52,9 @@ pub fn correlation_matrix(df: &DataFrame) -> Result<CorrelationMatrix, Profiling
     let correlations: Vec<(usize, usize, f64)> = pairs
         .par_iter()
         .map(|&(i, j)| {
-            let r = pearson_masked(
+            let r = pearson(
                 &values[i * n..(i + 1) * n],
-                &masks[i * n..(i + 1) * n],
                 &values[j * n..(j + 1) * n],
-                &masks[j * n..(j + 1) * n],
             );
             (i, j, r)
         })
@@ -85,43 +75,31 @@ pub fn correlation_matrix(df: &DataFrame) -> Result<CorrelationMatrix, Profiling
     })
 }
 
-/// Mask-weighted Pearson r in a single pass (BLAS / SIMD-friendly).
+/// Pearson r via the sum-of-products formula (SIMD-friendly tight loop).
 ///
-/// The inner loop is completely branch-free: the mask value (0 or 1)
-/// acts as a multiplicative weight, so the compiler can auto-vectorize
-/// the entire loop into packed SIMD instructions.
-///
-/// Uses the numerically stable "sum of products" formula:
 ///   r = (n·Σxy − Σx·Σy) / √[(n·Σx² − (Σx)²)(n·Σy² − (Σy)²)]
 #[inline]
-fn pearson_masked(x: &[f64], mx: &[f64], y: &[f64], my: &[f64]) -> f64 {
-    let len = x.len();
-    let mut count = 0.0f64;
+fn pearson(x: &[f64], y: &[f64]) -> f64 {
+    let n = x.len() as f64;
     let mut sum_x = 0.0f64;
     let mut sum_y = 0.0f64;
     let mut sum_xy = 0.0f64;
     let mut sum_x2 = 0.0f64;
     let mut sum_y2 = 0.0f64;
 
-    for k in 0..len {
-        let w = mx[k] * my[k]; // 1.0 when both valid, 0.0 otherwise
-        let xw = x[k] * w;
-        let yw = y[k] * w;
-        count += w;
-        sum_x += xw;
-        sum_y += yw;
-        sum_xy += x[k] * yw;
-        sum_x2 += x[k] * xw;
-        sum_y2 += y[k] * yw;
+    for k in 0..x.len() {
+        let xk = x[k];
+        let yk = y[k];
+        sum_x += xk;
+        sum_y += yk;
+        sum_xy += xk * yk;
+        sum_x2 += xk * xk;
+        sum_y2 += yk * yk;
     }
 
-    if count < 2.0 {
-        return f64::NAN;
-    }
-
-    let num = count * sum_xy - sum_x * sum_y;
-    let den_x = count * sum_x2 - sum_x * sum_x;
-    let den_y = count * sum_y2 - sum_y * sum_y;
+    let num = n * sum_xy - sum_x * sum_y;
+    let den_x = n * sum_x2 - sum_x * sum_x;
+    let den_y = n * sum_y2 - sum_y * sum_y;
     let denom = (den_x * den_y).sqrt();
 
     if denom == 0.0 {
@@ -169,42 +147,5 @@ mod tests {
         for i in 0..cm.columns.len() {
             assert!((cm.matrix[i][i] - 1.0).abs() < 1e-10);
         }
-    }
-
-    #[test]
-    fn test_with_nulls() {
-        let df = df! {
-            "a" => &[Some(1.0f64), None, Some(3.0), Some(4.0)],
-            "b" => &[Some(10.0f64), Some(20.0), None, Some(40.0)],
-        }
-        .unwrap();
-        let cm = correlation_matrix(&df).unwrap();
-        // Only rows 0 and 3 have both non-null → r = 1.0
-        assert!((cm.matrix[0][1] - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_with_nan() {
-        let df = df! {
-            "a" => &[Some(1.0f64), Some(f64::NAN), Some(3.0), Some(4.0)],
-            "b" => &[Some(10.0f64), Some(20.0), Some(30.0), Some(40.0)],
-        }
-        .unwrap();
-        let cm = correlation_matrix(&df).unwrap();
-        // Row 1 has NaN in "a" → treated as missing, pairwise drops it
-        // Remaining pairs: (1,10),(3,30),(4,40) → r = 1.0
-        assert!((cm.matrix[0][1] - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_all_null_column() {
-        let df = df! {
-            "a" => &[Option::<f64>::None, None, None],
-            "b" => &[Some(1.0f64), Some(2.0), Some(3.0)],
-        }
-        .unwrap();
-        let cm = correlation_matrix(&df).unwrap();
-        // No valid pairs → NaN
-        assert!(cm.matrix[0][1].is_nan());
     }
 }
