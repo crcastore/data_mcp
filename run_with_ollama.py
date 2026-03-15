@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Chat with an Ollama model that uses the data-profiler MCP server as tools.
+Chat with an OpenAI model that uses the data-profiler MCP server as tools.
 
 Usage:
-    python3 run_with_ollama.py [model_name] [csv_path]
+    python3 run_with_ollama.py <csv_path> [model_name]
+
+Requires:
+    OPENAI_API_KEY environment variable
 
 Defaults:
-    model_name = llama3.1:8b
-    csv_path   = test_data/simple.csv
+    model_name = gpt-4o
 """
 
 import json
@@ -19,7 +21,7 @@ import requests
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MCP_BIN = os.path.join(SCRIPT_DIR, "target", "release", "mcp")
-OLLAMA_URL = "http://localhost:11434/api/chat"
+OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +76,14 @@ class McpClient:
 
 
 # ---------------------------------------------------------------------------
-# Convert MCP tool schemas → Ollama tool format
+# Convert MCP tool schemas → OpenAI tool format
 # ---------------------------------------------------------------------------
 
-def mcp_tools_to_ollama(mcp_tools: list[dict]) -> list[dict]:
-    ollama_tools = []
+def mcp_tools_to_openai(mcp_tools: list[dict]) -> list[dict]:
+    openai_tools = []
     for t in mcp_tools:
         schema = t.get("inputSchema", {})
-        ollama_tools.append({
+        openai_tools.append({
             "type": "function",
             "function": {
                 "name": t["name"],
@@ -93,41 +95,69 @@ def mcp_tools_to_ollama(mcp_tools: list[dict]) -> list[dict]:
                 },
             },
         })
-    return ollama_tools
+    return openai_tools
 
 
 # ---------------------------------------------------------------------------
-# Ollama chat with tool-calling loop
+# OpenAI chat with tool-calling loop
 # ---------------------------------------------------------------------------
 
-def chat_with_tools(model: str, messages: list[dict], tools: list[dict],
-                    mcp: McpClient, max_rounds: int = 20) -> str:
-    for _ in range(max_rounds):
-        resp = requests.post(OLLAMA_URL, json={
-            "model": model,
-            "messages": messages,
-            "tools": tools,
-            "stream": False,
-        })
-        resp.raise_for_status()
+def chat_with_tools(model: str, api_key: str, messages: list[dict],
+                    tools: list[dict], mcp: McpClient,
+                    max_rounds: int = 20) -> str:
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    for round_num in range(max_rounds):
+        try:
+            resp = requests.post(OPENAI_URL, headers=headers, json={
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+            }, timeout=300)
+            resp.raise_for_status()
+        except requests.exceptions.Timeout:
+            print("  ⚠ OpenAI request timed out, finishing with partial results.")
+            return "Analysis incomplete — request timed out."
+        except requests.exceptions.HTTPError as e:
+            print(f"  ⚠ OpenAI API error: {e}")
+            print(f"    {resp.text[:500]}")
+            return f"Analysis incomplete — API error: {e}"
+
         data = resp.json()
-        msg = data["message"]
+        choice = data["choices"][0]
+        msg = choice["message"]
+
+        # Append assistant message to conversation.
         messages.append(msg)
 
         tool_calls = msg.get("tool_calls")
         if not tool_calls:
-            # No more tool calls — model is done.
             return msg.get("content", "")
 
         # Execute each tool call via MCP.
         for tc in tool_calls:
             fn = tc["function"]
             name = fn["name"]
-            args = fn.get("arguments", {})
+            call_id = tc["id"]
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except json.JSONDecodeError:
+                args = {}
+
+            # Skip if model tries to load_dataset again.
+            if name == "load_dataset":
+                print(f"  ⏭ Skipping redundant load_dataset call")
+                messages.append({"role": "tool", "tool_call_id": call_id,
+                                 "content": "Dataset is already loaded."})
+                continue
+
             print(f"  🔧 Calling tool: {name}({json.dumps(args)})")
             result = mcp.call_tool(name, args)
             print(f"  ← {result[:200]}{'...' if len(result) > 200 else ''}")
-            messages.append({"role": "tool", "content": result})
+            messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
 
     return "Reached maximum tool-calling rounds."
 
@@ -137,9 +167,21 @@ def chat_with_tools(model: str, messages: list[dict], tools: list[dict],
 # ---------------------------------------------------------------------------
 
 def main():
-    model = sys.argv[1] if len(sys.argv) > 1 else "llama3.1:8b"
-    csv_path = sys.argv[2] if len(sys.argv) > 2 else os.path.join(SCRIPT_DIR, "test_data", "simple.csv")
-    csv_path = os.path.abspath(csv_path)
+    if len(sys.argv) < 2:
+        print("Usage: python3 run_with_ollama.py <csv_path> [model_name]", file=sys.stderr)
+        sys.exit(1)
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("Error: OPENAI_API_KEY environment variable is not set.", file=sys.stderr)
+        sys.exit(1)
+
+    csv_path = os.path.abspath(sys.argv[1])
+    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-4o"
+
+    if not os.path.isfile(csv_path):
+        print(f"Error: file not found: {csv_path}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Model:   {model}")
     print(f"Dataset: {csv_path}")
@@ -150,44 +192,58 @@ def main():
         print("Building MCP server...")
         subprocess.run(["cargo", "build", "--release"], cwd=SCRIPT_DIR, check=True)
 
+    name = os.path.basename(csv_path)
+
+    print()
+    print("#" * 60)
+    print(f"# Dataset: {name}")
+    print("#" * 60)
+    print()
+
     # Start MCP server.
     mcp = McpClient(MCP_BIN)
     mcp.initialize()
     mcp_tools = mcp.list_tools()
-    ollama_tools = mcp_tools_to_ollama(mcp_tools)
-    print(f"MCP server started — {len(mcp_tools)} tools available.\n")
+    # Remove load_dataset from tools sent to model — we already loaded it.
+    openai_tools = [t for t in mcp_tools_to_openai(mcp_tools) if t["function"]["name"] != "load_dataset"]
+    print(f"MCP server started — {len(openai_tools)} tools available.")
 
-    # Load the dataset first.
+    # Load the dataset.
     print(f"Loading dataset: {csv_path}")
     result = mcp.call_tool("load_dataset", {"path": csv_path})
     print(f"  ← {result}\n")
 
-    # Chat loop.
+    load_info = json.loads(result)
+    rows = load_info.get('rows', '?')
+    cols = load_info.get('columns', '?')
+
     system_prompt = (
-        "You are a data analyst. A CSV dataset has already been loaded into the "
-        "data-profiler tool. Use the available tools to explore and analyze the "
-        "dataset. Start by examining its shape and column types, then provide a "
-        "thorough statistical summary. For any numeric columns that look like "
-        "time series, also run the reservoir computing diagnostics (surrogate_test, "
-        "bds_test, lyapunov_exponent, dependence_comparison, delay_embedding, "
-        "memory_profile)."
+        f"You are a data analyst. The CSV dataset '{name}' is already loaded "
+        f"({rows} rows, {cols} columns). Do NOT call load_dataset — it is already done.\n\n"
+        "Use the available tools to explore and analyze the dataset.\n"
+        "Step 1: Call column_types to discover the columns.\n"
+        "Step 2: Call correlation_matrix.\n"
+        "Step 3: For each numeric column, call mean, variance, quantiles, skewness, entropy, and sparsity.\n"
+        "Step 4: For numeric columns that could be time series, call surrogate_test, bds_test, "
+        "lyapunov_exponent, dependence_comparison, delay_embedding, and memory_profile.\n\n"
+        "Start by calling column_types. Do not explain your plan — just call the tools."
     )
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": "Profile this dataset thoroughly. Give me a complete analysis."},
+        {"role": "user", "content": f"Analyze '{name}'. Start by calling column_types now."},
     ]
 
     print("=" * 60)
-    print("Sending to Ollama...")
+    print("Sending to OpenAI...")
     print("=" * 60)
     print()
 
-    answer = chat_with_tools(model, messages, ollama_tools, mcp)
+    answer = chat_with_tools(model, api_key, messages, openai_tools, mcp)
 
     print()
     print("=" * 60)
-    print("ANALYSIS")
+    print(f"ANALYSIS — {name}")
     print("=" * 60)
     print(answer)
 
