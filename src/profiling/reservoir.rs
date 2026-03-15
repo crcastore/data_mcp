@@ -45,6 +45,35 @@ pub struct MemoryProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Helpers – preprocessing
+// ---------------------------------------------------------------------------
+
+/// Remove a linear trend from a series by subtracting the OLS fit.
+fn detrend(x: &[f64]) -> Vec<f64> {
+    let n = x.len();
+    if n < 2 {
+        return x.to_vec();
+    }
+    let nf = n as f64;
+    let sx: f64 = (0..n).map(|i| i as f64).sum();
+    let sy: f64 = x.iter().sum();
+    let sxy: f64 = x.iter().enumerate().map(|(i, &y)| i as f64 * y).sum();
+    let sx2: f64 = (0..n).map(|i| (i as f64).powi(2)).sum();
+    let den = nf * sx2 - sx * sx;
+    let (slope, intercept) = if den.abs() < 1e-30 {
+        (0.0, sy / nf)
+    } else {
+        let b = (nf * sxy - sx * sy) / den;
+        let a = (sy - b * sx) / nf;
+        (b, a)
+    };
+    x.iter()
+        .enumerate()
+        .map(|(i, &v)| v - (intercept + slope * i as f64))
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // 1. Surrogate data test
 // ---------------------------------------------------------------------------
 
@@ -58,11 +87,14 @@ pub fn surrogate_test(
     column: &str,
     num_surrogates: usize,
 ) -> Result<SurrogateTestResult, ProfilingError> {
-    let vals = extract_f64_values(df, column)?;
-    let n = vals.len();
-    if n < 10 {
+    let raw = extract_f64_values(df, column)?;
+    if raw.len() < 10 {
         return Err(ProfilingError::InsufficientData(10));
     }
+
+    // Detrend to remove linear drift that corrupts the null surrogates.
+    let vals = detrend(&raw);
+    let n = vals.len();
 
     let stat_real = time_reversal_asymmetry(&vals);
 
@@ -170,14 +202,17 @@ pub fn bds_test(
     embedding_dim: usize,
     epsilon: f64,
 ) -> Result<BdsTestResult, ProfilingError> {
-    let vals = extract_f64_values(df, column)?;
-    let n = vals.len();
+    let raw = extract_f64_values(df, column)?;
+    let n = raw.len();
     if n < 20 {
         return Err(ProfilingError::InsufficientData(20));
     }
     if embedding_dim < 2 {
         return Err(ProfilingError::InsufficientData(2));
     }
+
+    // Detrend to avoid false positives from simple linear drift.
+    let vals = detrend(&raw);
 
     let c1 = correlation_integral(&vals, 1, epsilon);
     let cm = correlation_integral(&vals, embedding_dim, epsilon);
@@ -731,6 +766,12 @@ mod tests {
         df! { "x" => &x }.unwrap()
     }
 
+    /// Pure linear ramp (should NOT be flagged as nonlinear after detrending).
+    fn pure_trend(n: usize) -> DataFrame {
+        let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+        df! { "x" => &x }.unwrap()
+    }
+
     // -- Surrogate test --
 
     #[test]
@@ -739,6 +780,17 @@ mod tests {
         let result = surrogate_test(&df, "x", 100).unwrap();
         assert!(result.z_score.abs() > 2.0);
         assert!(result.is_nonlinear);
+    }
+
+    #[test]
+    fn test_surrogate_trend_not_nonlinear() {
+        let df = pure_trend(500);
+        let result = surrogate_test(&df, "x", 100).unwrap();
+        assert!(
+            result.z_score.abs() < 5.0,
+            "Pure trend should not have extreme z-score after detrending, got {}",
+            result.z_score
+        );
     }
 
     // -- BDS test --
