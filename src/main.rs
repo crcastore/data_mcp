@@ -1,14 +1,19 @@
 use std::env;
 
 use mcp::dataset::Dataset;
+use mcp::server::McpServer;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
+
+    // No arguments → run as MCP server over stdio.
     if args.len() < 2 {
-        eprintln!("Usage: mcp <csv-file>");
-        std::process::exit(1);
+        let mut server = McpServer::new();
+        server.run()?;
+        return Ok(());
     }
 
+    // With a CSV path → run the CLI profiler.
     let ds = Dataset::from_csv(&args[1])?;
     println!("=== Dataset Profile ===");
     println!("Rows:    {}", ds.row_count());
