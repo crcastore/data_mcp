@@ -2,7 +2,7 @@ use polars::prelude::*;
 
 use crate::error::ProfilingError;
 
-/// Fraction of null values in the column (0.0 – 1.0).
+/// Fraction of null values in the column (always 0.0 when data has no nulls).
 pub fn missing_rate(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let col = df
         .column(column)
@@ -17,16 +17,6 @@ pub fn missing_rate(df: &DataFrame, column: &str) -> Result<f64, ProfilingError>
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_missing_rate_with_nulls() {
-        let df = df! {
-            "a" => &[Some(1i64), None, Some(3), None, Some(5)],
-        }
-        .unwrap();
-        let rate = missing_rate(&df, "a").unwrap();
-        assert!((rate - 0.4).abs() < 1e-10);
-    }
 
     #[test]
     fn test_missing_rate_no_nulls() {

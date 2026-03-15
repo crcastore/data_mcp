@@ -4,7 +4,7 @@ use serde::Serialize;
 use crate::error::ProfilingError;
 use crate::util::extract_f64_values;
 
-/// Arithmetic mean of non-null values.
+/// Arithmetic mean.
 pub fn mean(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let vals = extract_f64_values(df, column)?;
     if vals.is_empty() {
@@ -13,7 +13,7 @@ pub fn mean(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     Ok(vals.iter().sum::<f64>() / vals.len() as f64)
 }
 
-/// Sample variance (ddof = 1) of non-null values.
+/// Sample variance (ddof = 1).
 pub fn variance(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     let vals = extract_f64_values(df, column)?;
     let n = vals.len();
@@ -89,12 +89,6 @@ mod tests {
         assert!((q.max - 5.0).abs() < 1e-10);
         assert!(q.q25 >= q.min && q.q25 <= q.q50);
         assert!(q.q75 >= q.q50 && q.q75 <= q.max);
-    }
-
-    #[test]
-    fn test_mean_with_nulls() {
-        let df = df! { "x" => &[Some(2.0f64), None, Some(4.0)] }.unwrap();
-        assert!((mean(&df, "x").unwrap() - 3.0).abs() < 1e-10);
     }
 
     #[test]

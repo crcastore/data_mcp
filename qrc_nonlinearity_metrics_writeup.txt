@@ -1,0 +1,151 @@
+
+Metrics to Detect Nonlinear Structure in Data for Quantum Reservoir Computing
+
+Quantum reservoir computing (QRC) benefits most from datasets containing rich nonlinear structure.
+Before applying QRC, it is useful to evaluate whether the dataset contains nonlinear dependencies,
+feature interactions, chaotic dynamics, or regime switching behavior. The following metrics provide
+a practical diagnostic toolkit for identifying these properties.
+
+1. Linear vs Nonlinear Model Performance Gap
+
+Purpose:
+Detect whether nonlinear models significantly outperform linear models.
+
+Procedure:
+Train a linear model (e.g., linear regression or AR model) and a nonlinear model
+(e.g., kernel regression, random forest, or neural network).
+
+Metric:
+Nonlinearity Gap = R^2_nonlinear − R^2_linear
+
+Interpretation:
+Near zero: relationships are mostly linear
+Moderate: some nonlinear structure
+Large: strong nonlinear relationships present
+
+2. Mutual Information Between Variables
+
+Purpose:
+Measure nonlinear statistical dependence between variables.
+
+Metric:
+I(X;Y) = sum p(x,y) log( p(x,y) / (p(x)p(y)) )
+
+Interpretation:
+Compute the ratio MI / |Pearson correlation|.
+
+Ratio ≈ 1 → mostly linear dependence
+Ratio > 1 → nonlinear dependency exists
+
+3. Polynomial Interaction Test
+
+Purpose:
+Detect polynomial and multiplicative feature interactions.
+
+Procedure:
+Fit both linear regression and polynomial regression (degree 2–3).
+
+Metric:
+ΔR^2_poly = R^2_poly − R^2_linear
+
+Interpretation:
+Small difference → weak polynomial effects
+Large difference → strong nonlinear feature interactions
+
+4. BDS Test for Time-Series Nonlinearity
+
+Purpose:
+Detect nonlinear temporal dependencies in time series.
+
+The BDS statistic tests whether the time series behaves like an IID process.
+
+Interpretation:
+Not significant → mostly linear stochastic behavior
+Significant → nonlinear temporal dynamics present
+
+5. Lyapunov Exponent (Chaos Detection)
+
+Purpose:
+Identify chaotic dynamics.
+
+Metric:
+λ = limit (1/t) ln(|δx(t)| / |δx(0)|)
+
+Interpretation:
+λ < 0 → stable system
+λ = 0 → periodic system
+λ > 0 → chaotic dynamics
+
+Positive Lyapunov exponents suggest complex nonlinear systems well suited for reservoir models.
+
+6. Delay Mutual Information
+
+Purpose:
+Measure nonlinear temporal dependencies across time delays.
+
+Metric:
+I(X_t ; X_(t−τ))
+
+Interpretation:
+Rapid decay → weak dynamics
+Oscillatory pattern → periodic system
+Complex decay → nonlinear temporal dynamics
+
+7. Feature Interaction Strength
+
+Purpose:
+Detect multiplicative interactions between features.
+
+Procedure:
+Train a tree-based model (random forest or gradient boosting) and measure interaction importance.
+
+Metric:
+Interaction Strength = variance explained by interactions / total variance
+
+Interpretation:
+Low → mostly additive relationships
+High → strong feature coupling
+
+8. Regime Switching Detection
+
+Purpose:
+Identify threshold behavior or regime changes.
+
+Procedure:
+Fit hidden Markov models or switching autoregressive models.
+
+Metric:
+ΔLL = LL_switching − LL_single_model
+
+Interpretation:
+Large improvements indicate multiple regimes or switching dynamics.
+
+Combined Nonlinearity Score
+
+Multiple metrics can be combined into a single heuristic score:
+
+S =
+w1*(Nonlinearity Gap) +
+w2*(MI Ratio) +
+w3*(ΔR^2_poly) +
+w4*(Lyapunov Exponent) +
+w5*(Interaction Strength)
+
+Interpretation:
+Low score → linear models likely sufficient
+Moderate score → nonlinear ML useful
+High score → strong candidate for reservoir computing
+
+Recommended Diagnostic Pipeline
+
+1. Compare linear vs nonlinear model performance
+2. Estimate mutual information between variables
+3. Test polynomial feature interactions
+4. Run BDS time-series nonlinearity test
+5. Estimate Lyapunov exponent for chaos detection
+6. Compute delay mutual information
+7. Measure feature interaction strength using tree models
+8. Test regime-switching models
+
+Datasets showing strong signals in several of these diagnostics are likely to benefit
+from reservoir computing approaches, including quantum reservoir computing.
