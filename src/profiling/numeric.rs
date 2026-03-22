@@ -4,27 +4,6 @@ use serde::Serialize;
 use crate::error::ProfilingError;
 use crate::util::extract_f64_values;
 
-/// Arithmetic mean.
-pub fn mean(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
-    let vals = extract_f64_values(df, column)?;
-    if vals.is_empty() {
-        return Err(ProfilingError::EmptyDataset);
-    }
-    Ok(vals.iter().sum::<f64>() / vals.len() as f64)
-}
-
-/// Sample variance (ddof = 1).
-pub fn variance(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
-    let vals = extract_f64_values(df, column)?;
-    let n = vals.len();
-    if n < 2 {
-        return Err(ProfilingError::InsufficientData(2));
-    }
-    let mean = vals.iter().sum::<f64>() / n as f64;
-    let var = vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1) as f64;
-    Ok(var)
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct Quantiles {
     pub min: f64,
@@ -82,17 +61,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mean() {
-        assert!((mean(&df_nums(), "x").unwrap() - 3.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_variance() {
-        // sample var of [1,2,3,4,5] = 10/4 = 2.5
-        assert!((variance(&df_nums(), "x").unwrap() - 2.5).abs() < 1e-10);
-    }
-
-    #[test]
     fn test_quantiles() {
         let q = quantiles(&df_nums(), "x").unwrap();
         assert!((q.min - 1.0).abs() < 1e-10);
@@ -105,6 +73,6 @@ mod tests {
     #[test]
     fn test_not_numeric() {
         let df = df! { "s" => &["a", "b"] }.unwrap();
-        assert!(mean(&df, "s").is_err());
+        assert!(quantiles(&df, "s").is_err());
     }
 }

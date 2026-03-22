@@ -72,20 +72,6 @@ fn bench_column_types(c: &mut Criterion) {
     });
 }
 
-fn bench_mean(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("numeric::mean", |b| {
-        b.iter(|| numeric::mean(black_box(&df), "num_00").unwrap())
-    });
-}
-
-fn bench_variance(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("numeric::variance", |b| {
-        b.iter(|| numeric::variance(black_box(&df), "num_00").unwrap())
-    });
-}
-
 fn bench_quantiles(c: &mut Criterion) {
     let df = build_dataframe();
     c.bench_function("numeric::quantiles", |b| {
@@ -182,8 +168,6 @@ criterion_group!(
     bench_row_count,
     bench_column_count,
     bench_column_types,
-    bench_mean,
-    bench_variance,
     bench_quantiles,
     bench_unique_count,
     bench_entropy,
