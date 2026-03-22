@@ -196,6 +196,12 @@ impl McpServer {
                 Ok(json!({"column": c, "entropy": v}).to_string())
             }
 
+            // --- Covariance ---
+            "covariance_matrix" => {
+                let cm = ds.covariance_matrix().map_err(|e| e.to_string())?;
+                Ok(serde_json::to_string(&cm).unwrap())
+            }
+
             // --- Correlation ---
             "correlation_matrix" => {
                 let cm = ds.correlation_matrix().map_err(|e| e.to_string())?;
@@ -387,6 +393,11 @@ fn tools_schema() -> Value {
                 },
                 "required": ["column"]
             }
+        },
+        {
+            "name": "covariance_matrix",
+            "description": "Full covariance matrix (ddof=1) for all numeric columns. Returns column names and a flat row-major m×m matrix.",
+            "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "correlation_matrix",

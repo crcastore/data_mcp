@@ -39,22 +39,22 @@ struct PrecomputedStats {
 }
 
 /// Raw covariance matrix stored alongside column names.
-struct CovarianceMatrix {
-    columns: Vec<String>,
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CovarianceMatrix {
+    pub columns: Vec<String>,
     /// Flat row-major m×m matrix.
-    matrix: Vec<f64>,
+    pub matrix: Vec<f64>,
 }
 
 impl CovarianceMatrix {
-    fn get(&self, i: usize, j: usize) -> f64 {
+    pub fn get(&self, i: usize, j: usize) -> f64 {
         let m = self.columns.len();
         self.matrix[i * m + j]
     }
 }
 
-/// Single-pass precomputation: extract columns → compute means → build
-/// covariance matrix → read off variances (diagonal) and correlation
-/// (normalized off-diagonal). One allocation, one pass over the data.
+/// Precompute using Polars built-in SIMD-optimised aggregations:
+///   series.mean(), series.var(), polars_ops cov() for pairwise covariance.
 fn precompute(df: &DataFrame) -> PrecomputedStats {
     let numeric_names: Vec<String> = df
         .columns()
@@ -63,62 +63,35 @@ fn precompute(df: &DataFrame) -> PrecomputedStats {
         .map(|c| c.name().to_string())
         .collect();
 
-    let n = df.height();
     let m = numeric_names.len();
 
-    // ── Extract columns into HashMap + contiguous column-major buffer ──
+    // ── Extract columns + Polars per-column stats ──
     let mut column_data: HashMap<String, Vec<f64>> = HashMap::with_capacity(m);
-    let mut buf = vec![0.0f64; m * n]; // column-major: buf[col * n + row]
+    let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
+    let mut variances: HashMap<String, f64> = HashMap::with_capacity(m);
+    let mut chunked_vec: Vec<Float64Chunked> = Vec::with_capacity(m);
 
-    for (j, name) in numeric_names.iter().enumerate() {
+    for name in &numeric_names {
         let col = df.column(name).unwrap();
         let series = col.as_materialized_series();
         let ca = series.f64().unwrap();
-        let vals: Vec<f64> = ca.into_no_null_iter().collect();
-        let offset = j * n;
-        for (k, &v) in vals.iter().enumerate() {
-            buf[offset + k] = v;
-        }
-        column_data.insert(name.clone(), vals);
+
+        means.insert(name.clone(), series.mean().unwrap_or(0.0));
+        variances.insert(name.clone(), series.var(1).unwrap_or(0.0));
+        column_data.insert(name.clone(), ca.into_no_null_iter().collect());
+        chunked_vec.push(ca.clone());
     }
 
-    // ── Means: single pass over columns ──
-    let mut means_vec = vec![0.0f64; m];
-    let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
-    for (j, name) in numeric_names.iter().enumerate() {
-        let sum: f64 = buf[j * n..(j + 1) * n].iter().sum();
-        let mu = if n > 0 { sum / n as f64 } else { 0.0 };
-        means_vec[j] = mu;
-        means.insert(name.clone(), mu);
-    }
-
-    // ── Covariance matrix: Cov(i,j) = Σ (x_i - μ_i)(x_j - μ_j) / (n-1) ──
-    // Only compute upper triangle, mirror for lower.
+    // ── Covariance matrix via polars_ops::chunked_array::cov ──
     let mut cov_flat = vec![0.0f64; m * m];
-
-    if n > 1 {
-        let inv = 1.0 / (n as f64 - 1.0);
-        for i in 0..m {
-            let col_i = &buf[i * n..(i + 1) * n];
-            let mu_i = means_vec[i];
-            for j in i..m {
-                let col_j = &buf[j * n..(j + 1) * n];
-                let mu_j = means_vec[j];
-                let mut sum = 0.0f64;
-                for k in 0..n {
-                    sum += (col_i[k] - mu_i) * (col_j[k] - mu_j);
-                }
-                let val = sum * inv;
-                cov_flat[i * m + j] = val;
-                cov_flat[j * m + i] = val;
-            }
+    for i in 0..m {
+        cov_flat[i * m + i] = variances[&numeric_names[i]];
+        for j in (i + 1)..m {
+            let c = polars_ops::chunked_array::cov::cov(&chunked_vec[i], &chunked_vec[j], 1)
+                .unwrap_or(0.0);
+            cov_flat[i * m + j] = c;
+            cov_flat[j * m + i] = c;
         }
-    }
-
-    // ── Variances: diagonal of covariance matrix ──
-    let mut variances: HashMap<String, f64> = HashMap::with_capacity(m);
-    for (j, name) in numeric_names.iter().enumerate() {
-        variances.insert(name.clone(), cov_flat[j * m + j]);
     }
 
     // ── Correlation: r_ij = Cov(i,j) / √(Var(i) · Var(j)) ──
@@ -256,6 +229,12 @@ impl Dataset {
 
     pub fn entropy(&self, column: &str) -> Result<f64, ProfilingError> {
         profiling::entropy::entropy(&self.df, column)
+    }
+
+    // --- Covariance (cached) ---
+
+    pub fn covariance_matrix(&self) -> Result<CovarianceMatrix, ProfilingError> {
+        Ok(self.stats.covariance.clone())
     }
 
     // --- Correlation (cached) ---

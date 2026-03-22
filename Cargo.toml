@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 polars = { version = "0.53", features = ["csv", "lazy"] }
+polars-ops = { version = "0.53.0", features = ["cov"] }
 rayon = "1.11.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
