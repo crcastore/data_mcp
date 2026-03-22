@@ -34,8 +34,7 @@ pub fn correlation_matrix(df: &DataFrame) -> Result<CorrelationMatrix, Profiling
         let col = df
             .column(name)
             .map_err(|_| ProfilingError::ColumnNotFound(name.to_string()))?;
-        let casted = col.cast(&DataType::Float64)?;
-        let series = casted.as_materialized_series();
+        let series = col.as_materialized_series();
         let ca = series.f64()?;
         let offset = j * n;
         for (k, v) in ca.into_no_null_iter().enumerate() {

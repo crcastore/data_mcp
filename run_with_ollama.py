@@ -177,7 +177,7 @@ def main():
         sys.exit(1)
 
     csv_path = os.path.abspath(sys.argv[1])
-    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-4o"
+    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-4.1"
 
     if not os.path.isfile(csv_path):
         print(f"Error: file not found: {csv_path}", file=sys.stderr)
@@ -226,7 +226,11 @@ def main():
         "Step 3: For each numeric column, call mean, variance, quantiles, skewness, entropy, and sparsity.\n"
         "Step 4: For numeric columns that could be time series, call surrogate_test, bds_test, "
         "lyapunov_exponent, dependence_comparison, delay_embedding, and memory_profile.\n\n"
-        "Start by calling column_types. Do not explain your plan — just call the tools."
+        "Start by calling column_types. Do not explain your plan — just call the tools.\n\n"
+        "After gathering all results, write a detailed analysis. In particular, describe any "
+        "nonlinearities detected in the data: interpret the surrogate test z-scores, BDS test "
+        "p-values, Lyapunov exponents, and whether nonlinear dependence dominates over linear "
+        "dependence. Explain what these findings mean about the underlying data-generating process."
     )
 
     messages = [

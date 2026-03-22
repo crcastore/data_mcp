@@ -4,6 +4,23 @@ use std::path::Path;
 use crate::error::ProfilingError;
 use crate::profiling;
 
+/// Cast every numeric column to Float64 at load time.
+fn cast_all_to_f64(df: DataFrame) -> Result<DataFrame, ProfilingError> {
+    let height = df.height();
+    let cols: Vec<Column> = df
+        .columns()
+        .iter()
+        .map(|c: &Column| {
+            if c.dtype().is_numeric() {
+                c.cast(&DataType::Float64).unwrap_or_else(|_| c.clone())
+            } else {
+                c.clone()
+            }
+        })
+        .collect();
+    Ok(DataFrame::new(height, cols)?)
+}
+
 pub struct Dataset {
     df: DataFrame,
 }
@@ -13,11 +30,11 @@ impl Dataset {
         let df = CsvReadOptions::default()
             .try_into_reader_with_file_path(Some(path.as_ref().to_path_buf()))?
             .finish()?;
-        Ok(Self { df })
+        Ok(Self { df: cast_all_to_f64(df)? })
     }
 
     pub fn new(df: DataFrame) -> Self {
-        Self { df }
+        Self { df: cast_all_to_f64(df).expect("failed to cast columns to f64") }
     }
 
     pub fn dataframe(&self) -> &DataFrame {
@@ -36,12 +53,6 @@ impl Dataset {
 
     pub fn column_types(&self) -> Vec<(String, String)> {
         profiling::shape::column_types(&self.df)
-    }
-
-    // --- Missing ---
-
-    pub fn missing_rate(&self, column: &str) -> Result<f64, ProfilingError> {
-        profiling::missing::missing_rate(&self.df, column)
     }
 
     // --- Numeric ---

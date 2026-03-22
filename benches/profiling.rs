@@ -39,7 +39,7 @@ fn make_dataset(n: usize) -> Dataset {
     Dataset::new(df)
 }
 
-const SIZES: &[usize] = &[100, 1_000, 10_000, 100_000];
+const SIZES: &[usize] = &[10, 1_000];
 
 fn log_plot() -> PlotConfiguration {
     PlotConfiguration::default().summary_scale(AxisScale::Logarithmic)
@@ -78,18 +78,6 @@ fn bench_column_types(c: &mut Criterion) {
         let ds = make_dataset(n);
         group.bench_with_input(BenchmarkId::from_parameter(n), &ds, |b, ds| {
             b.iter(|| ds.column_types());
-        });
-    }
-    group.finish();
-}
-
-fn bench_missing_rate(c: &mut Criterion) {
-    let mut group = c.benchmark_group("missing_rate");
-    group.plot_config(log_plot());
-    for &n in SIZES {
-        let ds = make_dataset(n);
-        group.bench_with_input(BenchmarkId::from_parameter(n), &ds, |b, ds| {
-            b.iter(|| ds.missing_rate("maybe").unwrap());
         });
     }
     group.finish();
@@ -198,7 +186,6 @@ criterion_group!(
     bench_row_count,
     bench_column_count,
     bench_column_types,
-    bench_missing_rate,
     bench_mean,
     bench_variance,
     bench_quantiles,

@@ -28,7 +28,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (name, _dtype) in ds.column_types() {
         println!("--- {name} ---");
-        println!("  Missing rate:  {:.4}", ds.missing_rate(&name)?);
         println!("  Unique values: {}", ds.unique_count(&name)?);
         println!("  Entropy:       {:.4}", ds.entropy(&name)?);
         println!("  Sparsity:      {:.4}", ds.sparsity(&name)?);

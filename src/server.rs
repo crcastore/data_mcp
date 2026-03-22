@@ -152,13 +152,6 @@ impl McpServer {
                 Ok(json!({"columns": types}).to_string())
             }
 
-            // --- Missing ---
-            "missing_rate" => {
-                let c = get_str(args, "column")?;
-                let r = ds.missing_rate(c).map_err(|e| e.to_string())?;
-                Ok(json!({"column": c, "missing_rate": r}).to_string())
-            }
-
             // --- Numeric ---
             "mean" => {
                 let c = get_str(args, "column")?;
@@ -328,17 +321,6 @@ fn tools_schema() -> Value {
             "name": "column_types",
             "description": "Return the name and data type of every column.",
             "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
-            "name": "missing_rate",
-            "description": "Fraction of missing (null) values in a column.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Column name" }
-                },
-                "required": ["column"]
-            }
         },
         {
             "name": "mean",

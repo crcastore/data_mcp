@@ -3,7 +3,7 @@ use polars::prelude::*;
 
 use mcp::dataset::Dataset;
 use mcp::profiling::{
-    categorical, correlation, distribution, entropy, missing, numeric, reservoir, shape, sparsity,
+    categorical, correlation, distribution, entropy, numeric, reservoir, shape, sparsity,
 };
 
 /// Build a 50-column × 10 000-row DataFrame.
@@ -100,13 +100,6 @@ fn bench_unique_count(c: &mut Criterion) {
     });
 }
 
-fn bench_missing_rate(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("missing::missing_rate", |b| {
-        b.iter(|| missing::missing_rate(black_box(&df), "num_00").unwrap())
-    });
-}
-
 fn bench_entropy(c: &mut Criterion) {
     let df = build_dataframe();
     c.bench_function("entropy::entropy", |b| {
@@ -193,7 +186,6 @@ criterion_group!(
     bench_variance,
     bench_quantiles,
     bench_unique_count,
-    bench_missing_rate,
     bench_entropy,
     bench_skewness,
     bench_correlation_matrix,

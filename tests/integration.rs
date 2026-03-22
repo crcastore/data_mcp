@@ -34,15 +34,6 @@ fn test_column_types_length() {
 }
 
 #[test]
-fn test_missing_rates() {
-    let ds = sample_ds();
-    assert!(ds.missing_rate("age").unwrap().abs() < 1e-10);
-    assert!(ds.missing_rate("income").unwrap().abs() < 1e-10);
-    assert!(ds.missing_rate("city").unwrap().abs() < 1e-10);
-    assert!(ds.missing_rate("score").unwrap().abs() < 1e-10);
-}
-
-#[test]
 fn test_mean_age() {
     let ds = sample_ds();
     // age: [25,30,35,25,40,31,28,33,45,22] → sum=314, n=10
