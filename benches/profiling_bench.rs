@@ -3,7 +3,7 @@ use polars::prelude::*;
 
 use mcp::dataset::Dataset;
 use mcp::profiling::{
-    categorical, correlation, distribution, entropy, numeric, reservoir, shape, sparsity,
+    categorical, distribution, entropy, numeric, reservoir, shape, sparsity,
 };
 
 /// Build a 50-column × 10 000-row DataFrame.
@@ -100,13 +100,6 @@ fn bench_skewness(c: &mut Criterion) {
     });
 }
 
-fn bench_correlation_matrix(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("correlation::correlation_matrix", |b| {
-        b.iter(|| correlation::correlation_matrix(black_box(&df)).unwrap())
-    });
-}
-
 fn bench_sparsity(c: &mut Criterion) {
     let df = build_dataframe();
     c.bench_function("sparsity::sparsity", |b| {
@@ -172,7 +165,6 @@ criterion_group!(
     bench_unique_count,
     bench_entropy,
     bench_skewness,
-    bench_correlation_matrix,
     bench_sparsity,
     bench_dataset_from_dataframe,
     bench_surrogate_test,
