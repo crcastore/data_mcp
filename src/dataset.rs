@@ -2,15 +2,12 @@ use polars::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 
-use ndarray::{Array2, Axis};
-use ndarray_stats::CorrelationExt;
-
 use crate::error::ProfilingError;
 use crate::profiling;
 use crate::profiling::correlation::CorrelationMatrix;
 use crate::profiling::numeric::Quantiles;
 
-/// Cast every numeric column to Float64 at load time.
+/// Cast every numeric column to Float64 at load time — all data assumed numeric.
 fn cast_all_to_f64(df: DataFrame) -> Result<DataFrame, ProfilingError> {
     let height = df.height();
     let cols: Vec<Column> = df
@@ -31,97 +28,42 @@ fn cast_all_to_f64(df: DataFrame) -> Result<DataFrame, ProfilingError> {
 struct PrecomputedStats {
     /// Column name → extracted f64 values (no nulls).
     column_data: HashMap<String, Vec<f64>>,
-    /// Column name → arithmetic mean.
+    /// Column name → arithmetic mean (via Polars Series::mean).
     means: HashMap<String, f64>,
-    /// Column name → sample variance (ddof=1).
+    /// Column name → sample variance, ddof=1 (via Polars Series::var).
     variances: HashMap<String, f64>,
-    /// Pearson correlation matrix across all numeric columns.
+    /// Pearson correlation matrix (via rayon-parallel BLAS-style computation).
     correlation: CorrelationMatrix,
 }
 
-/// Build precomputed stats using ndarray matrix algebra.
+/// Precompute all stats using Polars built-in SIMD-optimised aggregations.
 fn precompute(df: &DataFrame) -> PrecomputedStats {
-    let numeric_names: Vec<String> = df
-        .columns()
-        .iter()
-        .filter(|c| c.dtype() == &DataType::Float64)
-        .map(|c| c.name().to_string())
-        .collect();
+    let mut column_data: HashMap<String, Vec<f64>> = HashMap::new();
+    let mut means: HashMap<String, f64> = HashMap::new();
+    let mut variances: HashMap<String, f64> = HashMap::new();
 
-    let n = df.height();
-    let m = numeric_names.len();
-
-    // ── Step 1: Extract columns into HashMap and build an n×m ndarray ──
-    let mut column_data: HashMap<String, Vec<f64>> = HashMap::with_capacity(m);
-    let mut data = Array2::<f64>::zeros((n, m));
-
-    for (j, name) in numeric_names.iter().enumerate() {
-        let col = df.column(name).unwrap();
+    for col in df.columns() {
+        if col.dtype() != &DataType::Float64 {
+            continue;
+        }
+        let name = col.name().to_string();
         let series = col.as_materialized_series();
         let ca = series.f64().unwrap();
-        let vals: Vec<f64> = ca.into_no_null_iter().collect();
-        for (k, &v) in vals.iter().enumerate() {
-            data[[k, j]] = v;
-        }
-        column_data.insert(name.clone(), vals);
+
+        // Polars SIMD-optimised per-column stats
+        means.insert(name.clone(), series.mean().unwrap_or(0.0));
+        variances.insert(name.clone(), series.var(1).unwrap_or(0.0));
+
+        // Cache raw values for downstream use (skewness, quantiles, reservoir)
+        column_data.insert(name, ca.into_no_null_iter().collect());
     }
 
-    // ── Step 2: Means via ndarray (μ = mean along axis 0) ──
-    let means_arr = data.mean_axis(Axis(0)).unwrap();
-    let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
-    for (j, name) in numeric_names.iter().enumerate() {
-        means.insert(name.clone(), means_arr[j]);
-    }
-
-    // ── Step 3: Covariance matrix via ndarray-stats  Σ = Cᵀ·C / (n−1) ──
-    //   .cov() requires n > ddof and m >= 1. For m < 2 we skip it and
-    //   compute variance directly from the single column.
-    let (variances, correlation) = if m >= 2 && n > 1 {
-        let cov = data.cov(1.0).unwrap(); // ddof=1 → sample covariance
-
-        let mut variances: HashMap<String, f64> = HashMap::with_capacity(m);
-        for (j, name) in numeric_names.iter().enumerate() {
-            variances.insert(name.clone(), cov[[j, j]]);
-        }
-
-        // Correlation: r_ij = Σ_ij / √(Σ_ii · Σ_jj)
-        let mut matrix = vec![vec![0.0f64; m]; m];
-        for i in 0..m {
-            matrix[i][i] = 1.0;
-            for j in (i + 1)..m {
-                let denom = (cov[[i, i]] * cov[[j, j]]).sqrt();
-                let r = if denom == 0.0 { 0.0 } else { cov[[i, j]] / denom };
-                matrix[i][j] = r;
-                matrix[j][i] = r;
-            }
-        }
-
-        let correlation = CorrelationMatrix {
-            columns: numeric_names.clone(),
-            matrix,
-        };
-        (variances, correlation)
-    } else {
-        // Single column or empty — compute variance manually.
-        let mut variances: HashMap<String, f64> = HashMap::with_capacity(m);
-        for (j, name) in numeric_names.iter().enumerate() {
-            let mu = means_arr[j];
-            let vals = &column_data[name];
-            if vals.len() > 1 {
-                let var = vals.iter().map(|x| (x - mu).powi(2)).sum::<f64>()
-                    / (vals.len() as f64 - 1.0);
-                variances.insert(name.clone(), var);
-            } else {
-                variances.insert(name.clone(), 0.0);
-            }
-        }
-        let matrix = if m == 1 { vec![vec![1.0]] } else { vec![] };
-        let correlation = CorrelationMatrix {
-            columns: numeric_names.clone(),
-            matrix,
-        };
-        (variances, correlation)
-    };
+    // Rayon-parallel Pearson correlation matrix over all numeric columns
+    let correlation = profiling::correlation::correlation_matrix(df)
+        .unwrap_or_else(|_| CorrelationMatrix {
+            columns: vec![],
+            matrix: vec![],
+        });
 
     PrecomputedStats {
         column_data,

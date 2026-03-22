@@ -4,8 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-ndarray = "0.16"
-ndarray-stats = "0.6"
 polars = { version = "0.53", features = ["csv", "lazy"] }
 rayon = "1.11.0"
 serde = { version = "1", features = ["derive"] }
