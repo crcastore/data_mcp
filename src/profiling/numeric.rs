@@ -50,6 +50,17 @@ pub fn quantiles(df: &DataFrame, column: &str) -> Result<Quantiles, ProfilingErr
     })
 }
 
+/// Build Quantiles from an already-sorted slice.
+pub fn quantiles_from_sorted(sorted: &[f64]) -> Quantiles {
+    Quantiles {
+        min: sorted[0],
+        q25: lerp_percentile(sorted, 0.25),
+        q50: lerp_percentile(sorted, 0.50),
+        q75: lerp_percentile(sorted, 0.75),
+        max: sorted[sorted.len() - 1],
+    }
+}
+
 /// Linear-interpolation percentile on a *sorted* slice.
 fn lerp_percentile(sorted: &[f64], p: f64) -> f64 {
     if sorted.len() == 1 {

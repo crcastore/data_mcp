@@ -26,6 +26,23 @@ pub fn skewness(df: &DataFrame, column: &str) -> Result<f64, ProfilingError> {
     Ok(adj * g1)
 }
 
+/// Skewness from pre-extracted values and a pre-computed mean.
+pub fn skewness_from_vals(vals: &[f64], mean: f64) -> Result<f64, ProfilingError> {
+    let n = vals.len();
+    if n < 3 {
+        return Err(ProfilingError::InsufficientData(3));
+    }
+    let nf = n as f64;
+    let m2: f64 = vals.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / nf;
+    if m2 == 0.0 {
+        return Ok(0.0);
+    }
+    let m3: f64 = vals.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / nf;
+    let g1 = m3 / m2.powf(1.5);
+    let adj = (nf * (nf - 1.0)).sqrt() / (nf - 2.0);
+    Ok(adj * g1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
