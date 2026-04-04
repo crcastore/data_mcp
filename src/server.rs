@@ -215,6 +215,13 @@ impl McpServer {
                 Ok(json!({"column": c, "sparsity": v}).to_string())
             }
 
+            // --- PCA ---
+            "pca" => {
+                let n = args.get("n_components").and_then(|v| v.as_u64()).map(|v| v as usize);
+                let r = ds.pca(n).map_err(|e| e.to_string())?;
+                Ok(serde_json::to_string(&r).unwrap())
+            }
+
             // --- Reservoir: Surrogate test ---
             "surrogate_test" => {
                 let c = get_str(args, "column")?;
@@ -413,6 +420,16 @@ fn tools_schema() -> Value {
                     "column": { "type": "string", "description": "Column name" }
                 },
                 "required": ["column"]
+            }
+        },
+        {
+            "name": "pca",
+            "description": "Principal Component Analysis derived from the precomputed SVD of the covariance matrix. Returns eigenvalues, explained variance ratios, cumulative variance ratios, and principal component loadings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "n_components": { "type": "integer", "description": "Number of principal components to return (default: all)" }
+                }
             }
         },
         {

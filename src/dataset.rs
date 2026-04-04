@@ -37,6 +37,24 @@ pub struct SvdDecomposition {
     pub vt: Vec<f64>,
 }
 
+/// PCA result derived from SVD of the covariance matrix.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PcaResult {
+    /// Original column names.
+    pub columns: Vec<String>,
+    /// Number of components returned.
+    pub n_components: usize,
+    /// Eigenvalues (variance explained by each component).
+    pub explained_variance: Vec<f64>,
+    /// Fraction of total variance explained by each component.
+    pub explained_variance_ratio: Vec<f64>,
+    /// Cumulative explained variance ratio.
+    pub cumulative_variance_ratio: Vec<f64>,
+    /// Principal component loadings, flat row-major n_components × m.
+    /// Each row is a principal component (eigenvector).
+    pub components: Vec<f64>,
+}
+
 /// Raw covariance matrix stored alongside column names.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CovarianceMatrix {
@@ -337,6 +355,45 @@ impl Dataset {
             .svd
             .as_ref()
             .ok_or(ProfilingError::NotEnoughColumns)
+    }
+
+    // --- PCA (derived from cached SVD) ---
+
+    pub fn pca(&self, n_components: Option<usize>) -> Result<PcaResult, ProfilingError> {
+        let svd = self.svd()?;
+        let m = svd.columns.len();
+        let k = n_components.unwrap_or(m).min(m);
+
+        let total_var: f64 = svd.singular_values.iter().sum();
+        let explained_variance: Vec<f64> = svd.singular_values[..k].to_vec();
+        let explained_variance_ratio: Vec<f64> = explained_variance
+            .iter()
+            .map(|&v| if total_var > 0.0 { v / total_var } else { 0.0 })
+            .collect();
+
+        let mut cumulative_variance_ratio = Vec::with_capacity(k);
+        let mut cumsum = 0.0;
+        for &r in &explained_variance_ratio {
+            cumsum += r;
+            cumulative_variance_ratio.push(cumsum);
+        }
+
+        // Components are rows of Vᵀ (each row = eigenvector of covariance matrix).
+        let mut components = Vec::with_capacity(k * m);
+        for i in 0..k {
+            for j in 0..m {
+                components.push(svd.vt[i * m + j]);
+            }
+        }
+
+        Ok(PcaResult {
+            columns: svd.columns.clone(),
+            n_components: k,
+            explained_variance,
+            explained_variance_ratio,
+            cumulative_variance_ratio,
+            components,
+        })
     }
 
     // --- Sparsity ---
