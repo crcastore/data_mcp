@@ -218,24 +218,36 @@ def main():
     cols = load_info.get('columns', '?')
 
     system_prompt = (
-        f"You are a data analyst. The CSV dataset '{name}' is already loaded "
+        f"You are a thorough data analyst. The CSV dataset '{name}' is already loaded "
         f"({rows} rows, {cols} columns). Do NOT call load_dataset — it is already done.\n\n"
-        "Use the available tools to explore and analyze the dataset.\n"
+        "IMPORTANT: You MUST call ALL of the following tools before writing ANY analysis. "
+        "Do NOT write a final answer until every step below is complete. "
+        "Do NOT summarize or explain your plan — just call tools.\n\n"
         "Step 1: Call column_types to discover the columns.\n"
         "Step 2: Call correlation_matrix.\n"
-        "Step 3: For each numeric column, call mean, variance, quantiles, skewness, entropy, and sparsity.\n"
-        "Step 4: For numeric columns that could be time series, call surrogate_test, bds_test, "
-        "lyapunov_exponent, dependence_comparison, delay_embedding, and memory_profile.\n\n"
-        "Start by calling column_types. Do not explain your plan — just call the tools.\n\n"
-        "After gathering all results, write a detailed analysis. In particular, describe any "
-        "nonlinearities detected in the data: interpret the surrogate test z-scores, BDS test "
-        "p-values, Lyapunov exponents, and whether nonlinear dependence dominates over linear "
-        "dependence. Explain what these findings mean about the underlying data-generating process."
+        "Step 3: For EVERY numeric column, call each of these tools (one call per column):\n"
+        "   mean, variance, quantiles, skewness, entropy, sparsity\n"
+        "Step 4: For EVERY numeric column, call each of these tools (one call per column):\n"
+        "   surrogate_test, bds_test (use embedding_dim=3, epsilon=1.0), "
+        "lyapunov_exponent, dependence_comparison, delay_embedding, memory_profile\n\n"
+        "You may batch multiple tool calls in a single turn. "
+        "Keep calling tools until you have results from ALL tools for ALL columns. "
+        "Only after ALL tool calls are done, write a comprehensive analysis that covers:\n"
+        "- Summary statistics (mean, variance, quantiles, skewness) for each column\n"
+        "- Correlations between columns\n"
+        "- Entropy and sparsity patterns\n"
+        "- Nonlinearity findings: interpret surrogate test z-scores, BDS test p-values, "
+        "Lyapunov exponents, and whether nonlinear dependence dominates linear dependence\n"
+        "- What these findings reveal about the data-generating process\n"
     )
 
     messages = [
         {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Analyze '{name}'. Start by calling column_types now."},
+        {"role": "user", "content": (
+            f"Analyze '{name}' thoroughly. Begin by calling column_types, then proceed "
+            "through ALL the steps. Call every tool for every column — do not skip any. "
+            "Do not write your final analysis until you have called all tools."
+        )},
     ]
 
     print("=" * 60)
