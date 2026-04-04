@@ -43,7 +43,7 @@ impl CovarianceMatrix {
     }
 }
 
-/// Precompute mean, variance, covariance, and correlation using ndarray-stats.
+/// Precompute mean, covariance, correlation, and variance using ndarray-stats.
 fn precompute(
     numeric_names: &[String],
     columns: &HashMap<String, ColumnData>,
@@ -52,7 +52,6 @@ fn precompute(
     let m = numeric_names.len();
 
     let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
-    let mut variances: HashMap<String, f64> = HashMap::with_capacity(m);
 
     // Build an n×m Array2 for ndarray-stats covariance.
     let mut matrix = Array2::<f64>::zeros((nrows, m));
@@ -61,20 +60,14 @@ fn precompute(
             for (i, &v) in vals.iter().enumerate() {
                 matrix[[i, j]] = v;
             }
-            let col = matrix.column(j);
-            let mean = col.mean().unwrap_or(0.0);
+            let mean = matrix.column(j).mean().unwrap_or(0.0);
             means.insert(name.clone(), mean);
-            let var = if nrows > 1 {
-                col.mapv(|x| (x - mean).powi(2)).sum() / (nrows - 1) as f64
-            } else {
-                0.0
-            };
-            variances.insert(name.clone(), var);
         }
     }
 
     // Covariance matrix via ndarray-stats (ddof=1).
-    let (cov_flat, corr_matrix) = if m >= 2 && nrows > 1 {
+    // Variances are read from the diagonal.
+    let (cov_flat, corr_matrix, variances) = if m >= 2 && nrows > 1 {
         let cov_mat = matrix.t().cov(1.0).unwrap_or_else(|_| Array2::zeros((m, m)));
 
         let mut flat = vec![0.0f64; m * m];
@@ -82,6 +75,12 @@ fn precompute(
             for j in 0..m {
                 flat[i * m + j] = cov_mat[[i, j]];
             }
+        }
+
+        // Variances from the diagonal.
+        let mut vars: HashMap<String, f64> = HashMap::with_capacity(m);
+        for (j, name) in numeric_names.iter().enumerate() {
+            vars.insert(name.clone(), cov_mat[[j, j]]);
         }
 
         // Correlation from covariance.
@@ -99,12 +98,20 @@ fn precompute(
                 corr[j][i] = r;
             }
         }
-        (flat, corr)
+        (flat, corr, vars)
     } else if m == 1 {
-        let v = variances[&numeric_names[0]];
-        (vec![v], vec![vec![1.0]])
+        // Single column — compute variance directly.
+        let var = if nrows > 1 {
+            let mean = means[&numeric_names[0]];
+            matrix.column(0).mapv(|x| (x - mean).powi(2)).sum() / (nrows - 1) as f64
+        } else {
+            0.0
+        };
+        let mut vars = HashMap::new();
+        vars.insert(numeric_names[0].clone(), var);
+        (vec![var], vec![vec![1.0]], vars)
     } else {
-        (vec![], vec![])
+        (vec![], vec![], HashMap::new())
     };
 
     let covariance = CovarianceMatrix {
