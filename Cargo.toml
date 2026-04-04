@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 csv = "1"
+faer = "0.24"
 ndarray = "0.16"
 ndarray-stats = "0.6"
 serde = { version = "1", features = ["derive"] }

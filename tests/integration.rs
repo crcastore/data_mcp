@@ -1,15 +1,14 @@
 use std::collections::HashMap;
 
-use mcp::dataset::{ColumnData, Dataset};
+use mcp::dataset::Dataset;
 
 fn sample_ds() -> Dataset {
-    let order = vec!["id".into(), "age".into(), "income".into(), "city".into(), "score".into()];
+    let order = vec!["id".into(), "age".into(), "income".into(), "score".into()];
     let mut cols = HashMap::new();
-    cols.insert("id".to_string(), ColumnData::Numeric(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]));
-    cols.insert("age".to_string(), ColumnData::Numeric(vec![25.0, 30.0, 35.0, 25.0, 40.0, 31.0, 28.0, 33.0, 45.0, 22.0]));
-    cols.insert("income".to_string(), ColumnData::Numeric(vec![50000.0, 60000.0, 70000.0, 55000.0, 80000.0, 75000.0, 45000.0, 62000.0, 90000.0, 40000.0]));
-    cols.insert("city".to_string(), ColumnData::String(vec!["NYC".into(), "LA".into(), "NYC".into(), "LA".into(), "NYC".into(), "Chicago".into(), "Chicago".into(), "LA".into(), "NYC".into(), "Chicago".into()]));
-    cols.insert("score".to_string(), ColumnData::Numeric(vec![85.5, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0]));
+    cols.insert("id".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]);
+    cols.insert("age".to_string(), vec![25.0, 30.0, 35.0, 25.0, 40.0, 31.0, 28.0, 33.0, 45.0, 22.0]);
+    cols.insert("income".to_string(), vec![50000.0, 60000.0, 70000.0, 55000.0, 80000.0, 75000.0, 45000.0, 62000.0, 90000.0, 40000.0]);
+    cols.insert("score".to_string(), vec![85.5, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0]);
     Dataset::from_columns(order, cols)
 }
 
@@ -20,12 +19,12 @@ fn test_row_count() {
 
 #[test]
 fn test_column_count() {
-    assert_eq!(sample_ds().column_count(), 5);
+    assert_eq!(sample_ds().column_count(), 4);
 }
 
 #[test]
 fn test_column_types_length() {
-    assert_eq!(sample_ds().column_types().len(), 5);
+    assert_eq!(sample_ds().column_types().len(), 4);
 }
 
 #[test]
@@ -57,22 +56,14 @@ fn test_skewness_reasonable() {
 }
 
 #[test]
-fn test_unique_count_city() {
-    // cities: NYC, LA, Chicago → 3
-    assert_eq!(sample_ds().unique_count("city").unwrap(), 3);
-}
-
-#[test]
 fn test_unique_count_id() {
     assert_eq!(sample_ds().unique_count("id").unwrap(), 10);
 }
 
 #[test]
 fn test_entropy_positive() {
-    let h = sample_ds().entropy("city").unwrap();
+    let h = sample_ds().entropy("age").unwrap();
     assert!(h > 0.0);
-    // 3 categories → H ≤ ln(3) ≈ 1.099
-    assert!(h < 3.0f64.ln() + 0.01);
 }
 
 #[test]
@@ -122,7 +113,7 @@ fn reservoir_ds() -> Dataset {
         x[i] = r * x[i - 1] * (1.0 - x[i - 1]);
     }
     let mut cols = HashMap::new();
-    cols.insert("signal".to_string(), ColumnData::Numeric(x));
+    cols.insert("signal".to_string(), x);
     Dataset::from_columns(vec!["signal".into()], cols)
 }
 

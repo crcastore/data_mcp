@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+use faer::Mat;
 use ndarray::Array2;
 use ndarray_stats::CorrelationExt;
 
@@ -9,14 +10,7 @@ use crate::profiling;
 use crate::profiling::correlation::CorrelationMatrix;
 use crate::profiling::numeric::Quantiles;
 
-/// Column data — either numeric (f64) or string.
-#[derive(Debug, Clone)]
-pub enum ColumnData {
-    Numeric(Vec<f64>),
-    String(Vec<String>),
-}
-
-/// Precomputed statistics for all numeric columns.
+/// Precomputed statistics for all columns.
 struct PrecomputedStats {
     /// Column name → arithmetic mean.
     means: HashMap<String, f64>,
@@ -26,6 +20,21 @@ struct PrecomputedStats {
     covariance: CovarianceMatrix,
     /// Pearson correlation matrix.
     correlation: CorrelationMatrix,
+    /// SVD of the covariance matrix.
+    svd: Option<SvdDecomposition>,
+}
+
+/// SVD decomposition of the covariance matrix (A = U S Vᵀ).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SvdDecomposition {
+    /// Column names corresponding to the matrix axes.
+    pub columns: Vec<String>,
+    /// Singular values in descending order (length m).
+    pub singular_values: Vec<f64>,
+    /// Left singular vectors U, flat row-major m×m.
+    pub u: Vec<f64>,
+    /// Right singular vectors Vᵀ, flat row-major m×m.
+    pub vt: Vec<f64>,
 }
 
 /// Raw covariance matrix stored alongside column names.
@@ -45,18 +54,18 @@ impl CovarianceMatrix {
 
 /// Precompute mean, covariance, correlation, and variance using ndarray-stats.
 fn precompute(
-    numeric_names: &[String],
-    columns: &HashMap<String, ColumnData>,
+    col_order: &[String],
+    columns: &HashMap<String, Vec<f64>>,
     nrows: usize,
 ) -> PrecomputedStats {
-    let m = numeric_names.len();
+    let m = col_order.len();
 
     let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
 
     // Build an n×m Array2 for ndarray-stats covariance.
     let mut matrix = Array2::<f64>::zeros((nrows, m));
-    for (j, name) in numeric_names.iter().enumerate() {
-        if let Some(ColumnData::Numeric(vals)) = columns.get(name) {
+    for (j, name) in col_order.iter().enumerate() {
+        if let Some(vals) = columns.get(name) {
             for (i, &v) in vals.iter().enumerate() {
                 matrix[[i, j]] = v;
             }
@@ -79,7 +88,7 @@ fn precompute(
 
         // Variances from the diagonal.
         let mut vars: HashMap<String, f64> = HashMap::with_capacity(m);
-        for (j, name) in numeric_names.iter().enumerate() {
+        for (j, name) in col_order.iter().enumerate() {
             vars.insert(name.clone(), cov_mat[[j, j]]);
         }
 
@@ -102,26 +111,60 @@ fn precompute(
     } else if m == 1 {
         // Single column — compute variance directly.
         let var = if nrows > 1 {
-            let mean = means[&numeric_names[0]];
+            let mean = means[&col_order[0]];
             matrix.column(0).mapv(|x| (x - mean).powi(2)).sum() / (nrows - 1) as f64
         } else {
             0.0
         };
         let mut vars = HashMap::new();
-        vars.insert(numeric_names[0].clone(), var);
+        vars.insert(col_order[0].clone(), var);
         (vec![var], vec![vec![1.0]], vars)
     } else {
         (vec![], vec![], HashMap::new())
     };
 
     let covariance = CovarianceMatrix {
-        columns: numeric_names.to_vec(),
+        columns: col_order.to_vec(),
         matrix: cov_flat,
     };
 
     let correlation = CorrelationMatrix {
-        columns: numeric_names.to_vec(),
+        columns: col_order.to_vec(),
         matrix: corr_matrix,
+    };
+
+    // SVD of the covariance matrix via faer.
+    let svd = if m >= 2 {
+        let cov_faer = Mat::from_fn(m, m, |i, j| covariance.get(i, j));
+        match cov_faer.svd() {
+            Ok(decomp) => {
+                let u_mat = decomp.U();
+                let vt_mat = decomp.V().transpose();
+                let s_diag = decomp.S();
+
+                let mut u_flat = vec![0.0f64; m * m];
+                let mut vt_flat = vec![0.0f64; m * m];
+                let mut singular_values = vec![0.0f64; m];
+
+                for i in 0..m {
+                    singular_values[i] = s_diag[i];
+                    for j in 0..m {
+                        u_flat[i * m + j] = u_mat[(i, j)];
+                        vt_flat[i * m + j] = vt_mat[(i, j)];
+                    }
+                }
+
+                Some(SvdDecomposition {
+                    columns: col_order.to_vec(),
+                    singular_values,
+                    u: u_flat,
+                    vt: vt_flat,
+                })
+            }
+            Err(_) => None,
+        }
+    } else {
+        None
     };
 
     PrecomputedStats {
@@ -129,17 +172,15 @@ fn precompute(
         variances,
         covariance,
         correlation,
+        svd,
     }
 }
 
 pub struct Dataset {
-    /// Column name → data (preserves insertion order via `col_order`).
-    columns: HashMap<String, ColumnData>,
+    /// Column name → f64 data.
+    columns: HashMap<String, Vec<f64>>,
     /// Column names in original order.
     col_order: Vec<String>,
-    /// Names of numeric columns only, in order.
-    #[allow(dead_code)]
-    numeric_names: Vec<String>,
     /// Number of rows.
     nrows: usize,
     /// Precomputed stats.
@@ -173,74 +214,37 @@ impl Dataset {
 
         let nrows = raw_cols.first().map_or(0, |c| c.len());
 
-        // Determine column types: if all non-empty values parse as f64, it's numeric.
+        // Parse all columns as f64. Non-parseable / empty values become 0.0.
         let mut columns = HashMap::with_capacity(ncols);
-        let mut numeric_names = Vec::new();
 
         for (j, name) in headers.iter().enumerate() {
             let raw = &raw_cols[j];
-            let parsed: Vec<Option<f64>> = raw
+            let vals: Vec<f64> = raw
                 .iter()
-                .map(|s| {
-                    let trimmed = s.trim();
-                    if trimmed.is_empty() {
-                        None
-                    } else {
-                        trimmed.parse::<f64>().ok()
-                    }
-                })
+                .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
                 .collect();
-
-            let non_empty_count = parsed.iter().filter(|v| v.is_some()).count();
-            let all_numeric = non_empty_count > 0
-                && parsed
-                    .iter()
-                    .zip(raw.iter())
-                    .all(|(p, s)| p.is_some() || s.trim().is_empty());
-
-            if all_numeric {
-                let vals: Vec<f64> = parsed.iter().map(|v| v.unwrap_or(0.0)).collect();
-                columns.insert(name.clone(), ColumnData::Numeric(vals));
-                numeric_names.push(name.clone());
-            } else {
-                columns.insert(name.clone(), ColumnData::String(raw.clone()));
-            }
+            columns.insert(name.clone(), vals);
         }
 
-        let stats = precompute(&numeric_names, &columns, nrows);
+        let stats = precompute(&headers, &columns, nrows);
 
         Ok(Self {
             columns,
             col_order: headers,
-            numeric_names,
             nrows,
             stats,
         })
     }
 
     /// Build a Dataset from pre-built column data (for tests / benches).
-    pub fn from_columns(col_order: Vec<String>, columns: HashMap<String, ColumnData>) -> Self {
-        let nrows = columns
-            .values()
-            .next()
-            .map(|c| match c {
-                ColumnData::Numeric(v) => v.len(),
-                ColumnData::String(v) => v.len(),
-            })
-            .unwrap_or(0);
+    pub fn from_columns(col_order: Vec<String>, columns: HashMap<String, Vec<f64>>) -> Self {
+        let nrows = columns.values().next().map_or(0, |v| v.len());
 
-        let numeric_names: Vec<String> = col_order
-            .iter()
-            .filter(|n| matches!(columns.get(*n), Some(ColumnData::Numeric(_))))
-            .cloned()
-            .collect();
-
-        let stats = precompute(&numeric_names, &columns, nrows);
+        let stats = precompute(&col_order, &columns, nrows);
 
         Self {
             columns,
             col_order,
-            numeric_names,
             nrows,
             stats,
         }
@@ -259,14 +263,7 @@ impl Dataset {
     pub fn column_types(&self) -> Vec<(String, String)> {
         self.col_order
             .iter()
-            .map(|name| {
-                let dtype = match self.columns.get(name) {
-                    Some(ColumnData::Numeric(_)) => "f64",
-                    Some(ColumnData::String(_)) => "str",
-                    None => "unknown",
-                };
-                (name.clone(), dtype.to_string())
-            })
+            .map(|name| (name.clone(), "f64".to_string()))
             .collect()
     }
 
@@ -289,7 +286,7 @@ impl Dataset {
     }
 
     pub fn quantiles(&self, column: &str) -> Result<Quantiles, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         if vals.is_empty() {
             return Err(ProfilingError::EmptyDataset);
         }
@@ -301,35 +298,24 @@ impl Dataset {
     // --- Distribution (uses cached mean) ---
 
     pub fn skewness(&self, column: &str) -> Result<f64, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         let mean = self.stats.means[column];
         profiling::distribution::skewness_from_vals(vals, mean)
     }
 
-    // --- Categorical ---
+    // --- Unique count ---
 
     pub fn unique_count(&self, column: &str) -> Result<usize, ProfilingError> {
-        match self.columns.get(column) {
-            Some(ColumnData::Numeric(vals)) => {
-                let set: HashSet<u64> = vals.iter().map(|v| v.to_bits()).collect();
-                Ok(set.len())
-            }
-            Some(ColumnData::String(vals)) => {
-                let set: HashSet<&str> = vals.iter().map(|s| s.as_str()).collect();
-                Ok(set.len())
-            }
-            None => Err(ProfilingError::ColumnNotFound(column.to_string())),
-        }
+        let vals = self.get_column(column)?;
+        let set: HashSet<u64> = vals.iter().map(|v| v.to_bits()).collect();
+        Ok(set.len())
     }
 
     // --- Entropy ---
 
     pub fn entropy(&self, column: &str) -> Result<f64, ProfilingError> {
-        match self.columns.get(column) {
-            Some(ColumnData::Numeric(vals)) => profiling::entropy::entropy_numeric(vals),
-            Some(ColumnData::String(vals)) => profiling::entropy::entropy_categorical(vals),
-            None => Err(ProfilingError::ColumnNotFound(column.to_string())),
-        }
+        let vals = self.get_column(column)?;
+        profiling::entropy::entropy_numeric(vals)
     }
 
     // --- Covariance (cached) ---
@@ -344,26 +330,24 @@ impl Dataset {
         Ok(self.stats.correlation.clone())
     }
 
+    // --- SVD (cached) ---
+
+    pub fn svd(&self) -> Result<&SvdDecomposition, ProfilingError> {
+        self.stats
+            .svd
+            .as_ref()
+            .ok_or(ProfilingError::NotEnoughColumns)
+    }
+
     // --- Sparsity ---
 
     pub fn sparsity(&self, column: &str) -> Result<f64, ProfilingError> {
-        match self.columns.get(column) {
-            Some(ColumnData::Numeric(vals)) => {
-                if vals.is_empty() {
-                    return Err(ProfilingError::EmptyDataset);
-                }
-                let zero_count = vals.iter().filter(|&&v| v == 0.0).count();
-                Ok(zero_count as f64 / vals.len() as f64)
-            }
-            Some(ColumnData::String(vals)) => {
-                if vals.is_empty() {
-                    return Err(ProfilingError::EmptyDataset);
-                }
-                let empty_count = vals.iter().filter(|v| v.is_empty()).count();
-                Ok(empty_count as f64 / vals.len() as f64)
-            }
-            None => Err(ProfilingError::ColumnNotFound(column.to_string())),
+        let vals = self.get_column(column)?;
+        if vals.is_empty() {
+            return Err(ProfilingError::EmptyDataset);
         }
+        let zero_count = vals.iter().filter(|&&v| v == 0.0).count();
+        Ok(zero_count as f64 / vals.len() as f64)
     }
 
     // --- Reservoir Computing ---
@@ -373,7 +357,7 @@ impl Dataset {
         column: &str,
         num_surrogates: usize,
     ) -> Result<profiling::reservoir::SurrogateTestResult, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         profiling::reservoir::surrogate_test(vals, num_surrogates)
     }
 
@@ -383,7 +367,7 @@ impl Dataset {
         embedding_dim: usize,
         epsilon: f64,
     ) -> Result<profiling::reservoir::BdsTestResult, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         profiling::reservoir::bds_test(vals, embedding_dim, epsilon)
     }
 
@@ -393,7 +377,7 @@ impl Dataset {
         embedding_dim: usize,
         tau: usize,
     ) -> Result<f64, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         profiling::reservoir::lyapunov_exponent(vals, embedding_dim, tau)
     }
 
@@ -402,7 +386,7 @@ impl Dataset {
         column: &str,
         max_lag: usize,
     ) -> Result<profiling::reservoir::DependenceComparison, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         profiling::reservoir::dependence_comparison(vals, max_lag)
     }
 
@@ -411,7 +395,7 @@ impl Dataset {
         column: &str,
         max_dim: usize,
     ) -> Result<profiling::reservoir::DelayEmbedding, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         profiling::reservoir::delay_embedding(vals, max_dim)
     }
 
@@ -420,17 +404,16 @@ impl Dataset {
         column: &str,
         max_lag: usize,
     ) -> Result<profiling::reservoir::MemoryProfile, ProfilingError> {
-        let vals = self.get_numeric(column)?;
+        let vals = self.get_column(column)?;
         profiling::reservoir::memory_profile(vals, max_lag)
     }
 
     // --- Helpers ---
 
-    fn get_numeric(&self, column: &str) -> Result<&[f64], ProfilingError> {
-        match self.columns.get(column) {
-            Some(ColumnData::Numeric(vals)) => Ok(vals),
-            Some(ColumnData::String(_)) => Err(ProfilingError::NotNumeric(column.to_string())),
-            None => Err(ProfilingError::ColumnNotFound(column.to_string())),
-        }
+    fn get_column(&self, column: &str) -> Result<&[f64], ProfilingError> {
+        self.columns
+            .get(column)
+            .map(|v| v.as_slice())
+            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
     }
 }

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::error::ProfilingError;
 
 /// Entropy for numeric columns — differential entropy estimate via histogram.
@@ -60,52 +58,9 @@ pub fn entropy_numeric(vals: &[f64]) -> Result<f64, ProfilingError> {
     Ok(h)
 }
 
-/// Entropy for categorical columns using exact value counts.
-pub fn entropy_categorical(vals: &[String]) -> Result<f64, ProfilingError> {
-    let n = vals.len();
-    if n == 0 {
-        return Err(ProfilingError::EmptyDataset);
-    }
-
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for val in vals {
-        *counts.entry(val.as_str()).or_default() += 1;
-    }
-
-    let nf = n as f64;
-    let h = counts
-        .values()
-        .map(|&c| {
-            let p = c as f64 / nf;
-            -p * p.ln()
-        })
-        .sum::<f64>();
-
-    Ok(h)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_entropy_uniform_categorical() {
-        let vals: Vec<String> = vec!["a", "b", "c", "d"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        let h = entropy_categorical(&vals).unwrap();
-        assert!((h - 4.0f64.ln()).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_entropy_single_value_categorical() {
-        let vals: Vec<String> = vec!["x", "x", "x"]
-            .into_iter()
-            .map(String::from)
-            .collect();
-        assert!(entropy_categorical(&vals).unwrap().abs() < 1e-10);
-    }
 
     #[test]
     fn test_entropy_numeric_binned() {

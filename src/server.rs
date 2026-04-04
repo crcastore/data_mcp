@@ -325,7 +325,7 @@ fn tools_schema() -> Value {
         },
         {
             "name": "column_types",
-            "description": "Return the name and data type of every column.",
+            "description": "Return the name and data type (f64) of every column.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -374,7 +374,7 @@ fn tools_schema() -> Value {
         },
         {
             "name": "unique_count",
-            "description": "Number of distinct values in a column.",
+            "description": "Number of distinct values in a numeric column.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -406,7 +406,7 @@ fn tools_schema() -> Value {
         },
         {
             "name": "sparsity",
-            "description": "Fraction of zero (numeric) or empty-string (string) values in a column.",
+            "description": "Fraction of zero values in a column.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

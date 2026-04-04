@@ -3,31 +3,23 @@ use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
-use mcp::dataset::{ColumnData, Dataset};
+use mcp::dataset::Dataset;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
 fn make_dataset(n: usize) -> Dataset {
     let mut val = Vec::with_capacity(n);
-    let mut cat = Vec::with_capacity(n);
     let mut sparse = Vec::with_capacity(n);
-
-    let cats = [
-        "alpha", "beta", "gamma", "delta", "epsilon",
-        "zeta", "eta", "theta", "iota", "kappa",
-    ];
 
     for i in 0..n {
         val.push((i as f64).sin() * 100.0);
-        cat.push(cats[i % cats.len()].to_string());
         sparse.push(if i % 10 == 0 { i as f64 } else { 0.0 });
     }
 
-    let order = vec!["val".into(), "cat".into(), "sparse".into()];
+    let order = vec!["val".into(), "sparse".into()];
     let mut cols = HashMap::new();
-    cols.insert("val".to_string(), ColumnData::Numeric(val));
-    cols.insert("cat".to_string(), ColumnData::String(cat));
-    cols.insert("sparse".to_string(), ColumnData::Numeric(sparse));
+    cols.insert("val".to_string(), val);
+    cols.insert("sparse".to_string(), sparse);
     Dataset::from_columns(order, cols)
 }
 
@@ -81,10 +73,10 @@ fn bench_compute(c: &mut Criterion) {
             b.iter(|| ds.skewness("val").unwrap());
         });
         group.bench_with_input(BenchmarkId::new("unique_count", n), &ds, |b, ds| {
-            b.iter(|| ds.unique_count("cat").unwrap());
+            b.iter(|| ds.unique_count("val").unwrap());
         });
         group.bench_with_input(BenchmarkId::new("entropy", n), &ds, |b, ds| {
-            b.iter(|| ds.entropy("cat").unwrap());
+            b.iter(|| ds.entropy("val").unwrap());
         });
         group.bench_with_input(BenchmarkId::new("sparsity", n), &ds, |b, ds| {
             b.iter(|| ds.sparsity("sparse").unwrap());
@@ -102,23 +94,18 @@ fn bench_init(c: &mut Criterion) {
     for &n in SIZES {
         // Build raw data outside the loop — only measure precompute.
         let mut val = Vec::with_capacity(n);
-        let mut cat = Vec::with_capacity(n);
         let mut sparse = Vec::with_capacity(n);
-        let cats = ["alpha", "beta", "gamma", "delta", "epsilon",
-                     "zeta", "eta", "theta", "iota", "kappa"];
         for i in 0..n {
             val.push((i as f64).sin() * 100.0);
-            cat.push(cats[i % cats.len()].to_string());
             sparse.push(if i % 10 == 0 { i as f64 } else { 0.0 });
         }
 
         group.bench_with_input(BenchmarkId::new("Dataset::from_columns", n), &n, |b, _| {
             b.iter(|| {
-                let order = vec!["val".into(), "cat".into(), "sparse".into()];
+                let order = vec!["val".into(), "sparse".into()];
                 let mut cols = HashMap::new();
-                cols.insert("val".to_string(), ColumnData::Numeric(val.clone()));
-                cols.insert("cat".to_string(), ColumnData::String(cat.clone()));
-                cols.insert("sparse".to_string(), ColumnData::Numeric(sparse.clone()));
+                cols.insert("val".to_string(), val.clone());
+                cols.insert("sparse".to_string(), sparse.clone());
                 Dataset::from_columns(order, cols)
             });
         });
