@@ -1,9 +1,9 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use polars::prelude::*;
 
-use mcp::dataset::Dataset;
+use mcp::dataset::{ColumnData, Dataset};
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -11,7 +11,6 @@ fn make_dataset(n: usize) -> Dataset {
     let mut val = Vec::with_capacity(n);
     let mut cat = Vec::with_capacity(n);
     let mut sparse = Vec::with_capacity(n);
-    let mut maybe: Vec<Option<f64>> = Vec::with_capacity(n);
 
     let cats = [
         "alpha", "beta", "gamma", "delta", "epsilon",
@@ -22,18 +21,14 @@ fn make_dataset(n: usize) -> Dataset {
         val.push((i as f64).sin() * 100.0);
         cat.push(cats[i % cats.len()].to_string());
         sparse.push(if i % 10 == 0 { i as f64 } else { 0.0 });
-        maybe.push(if i % 5 == 0 { None } else { Some(i as f64) });
     }
 
-    let df = DataFrame::new(n, vec![
-        Column::new("val".into(), &val),
-        Column::new("cat".into(), &cat),
-        Column::new("sparse".into(), &sparse),
-        Column::new("maybe".into(), &maybe),
-    ])
-    .expect("failed to build benchmark DataFrame");
-
-    Dataset::new(df)
+    let order = vec!["val".into(), "cat".into(), "sparse".into()];
+    let mut cols = HashMap::new();
+    cols.insert("val".to_string(), ColumnData::Numeric(val));
+    cols.insert("cat".to_string(), ColumnData::String(cat));
+    cols.insert("sparse".to_string(), ColumnData::Numeric(sparse));
+    Dataset::from_columns(order, cols)
 }
 
 const SIZES: &[usize] = &[10, 1_000];
@@ -105,7 +100,7 @@ fn bench_init(c: &mut Criterion) {
     group.sample_size(10);
 
     for &n in SIZES {
-        // Build raw DataFrame outside the loop — only measure precompute.
+        // Build raw data outside the loop — only measure precompute.
         let mut val = Vec::with_capacity(n);
         let mut cat = Vec::with_capacity(n);
         let mut sparse = Vec::with_capacity(n);
@@ -116,14 +111,16 @@ fn bench_init(c: &mut Criterion) {
             cat.push(cats[i % cats.len()].to_string());
             sparse.push(if i % 10 == 0 { i as f64 } else { 0.0 });
         }
-        let df = DataFrame::new(n, vec![
-            Column::new("val".into(), &val),
-            Column::new("cat".into(), &cat),
-            Column::new("sparse".into(), &sparse),
-        ]).unwrap();
 
-        group.bench_with_input(BenchmarkId::new("Dataset::new", n), &df, |b, df| {
-            b.iter(|| Dataset::new(df.clone()));
+        group.bench_with_input(BenchmarkId::new("Dataset::from_columns", n), &n, |b, _| {
+            b.iter(|| {
+                let order = vec!["val".into(), "cat".into(), "sparse".into()];
+                let mut cols = HashMap::new();
+                cols.insert("val".to_string(), ColumnData::Numeric(val.clone()));
+                cols.insert("cat".to_string(), ColumnData::String(cat.clone()));
+                cols.insert("sparse".to_string(), ColumnData::Numeric(sparse.clone()));
+                Dataset::from_columns(order, cols)
+            });
         });
     }
     group.finish();

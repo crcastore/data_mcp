@@ -1,21 +1,16 @@
-use polars::prelude::*;
+use std::collections::HashMap;
 
-use mcp::dataset::Dataset;
+use mcp::dataset::{ColumnData, Dataset};
 
 fn sample_ds() -> Dataset {
-    let df = df! {
-        "id"     => &[1i64, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-        "age"    => &[25i64, 30, 35, 25, 40, 31, 28, 33, 45, 22],
-        "income" => &[50000.0f64, 60000.0, 70000.0, 55000.0,
-                      80000.0, 75000.0, 45000.0, 62000.0,
-                      90000.0, 40000.0],
-        "city"   => &["NYC", "LA", "NYC", "LA",
-                      "NYC", "Chicago", "Chicago", "LA",
-                      "NYC", "Chicago"],
-        "score"  => &[85.5f64, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0],
-    }
-    .unwrap();
-    Dataset::new(df)
+    let order = vec!["id".into(), "age".into(), "income".into(), "city".into(), "score".into()];
+    let mut cols = HashMap::new();
+    cols.insert("id".to_string(), ColumnData::Numeric(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]));
+    cols.insert("age".to_string(), ColumnData::Numeric(vec![25.0, 30.0, 35.0, 25.0, 40.0, 31.0, 28.0, 33.0, 45.0, 22.0]));
+    cols.insert("income".to_string(), ColumnData::Numeric(vec![50000.0, 60000.0, 70000.0, 55000.0, 80000.0, 75000.0, 45000.0, 62000.0, 90000.0, 40000.0]));
+    cols.insert("city".to_string(), ColumnData::String(vec!["NYC".into(), "LA".into(), "NYC".into(), "LA".into(), "NYC".into(), "Chicago".into(), "Chicago".into(), "LA".into(), "NYC".into(), "Chicago".into()]));
+    cols.insert("score".to_string(), ColumnData::Numeric(vec![85.5, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0]));
+    Dataset::from_columns(order, cols)
 }
 
 #[test]
@@ -126,8 +121,9 @@ fn reservoir_ds() -> Dataset {
     for i in 1..n {
         x[i] = r * x[i - 1] * (1.0 - x[i - 1]);
     }
-    let df = df! { "signal" => &x }.unwrap();
-    Dataset::new(df)
+    let mut cols = HashMap::new();
+    cols.insert("signal".to_string(), ColumnData::Numeric(x));
+    Dataset::from_columns(vec!["signal".into()], cols)
 }
 
 #[test]

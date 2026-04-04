@@ -13,5 +13,5 @@ pub enum ProfilingError {
     #[error("not enough data points (need at least {0})")]
     InsufficientData(usize),
     #[error("{0}")]
-    Polars(#[from] polars::error::PolarsError),
+    Csv(#[from] csv::Error),
 }

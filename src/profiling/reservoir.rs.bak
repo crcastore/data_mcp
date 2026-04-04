@@ -1,6 +1,8 @@
+use polars::prelude::*;
 use serde::Serialize;
 
 use crate::error::ProfilingError;
+use crate::util::extract_f64_values;
 
 // ---------------------------------------------------------------------------
 // Result types
@@ -81,15 +83,17 @@ fn detrend(x: &[f64]) -> Vec<f64> {
 /// residuals, and compares the time-reversal asymmetry statistic.
 /// A `z_score` with absolute value > 2 indicates nonlinear structure.
 pub fn surrogate_test(
-    raw: &[f64],
+    df: &DataFrame,
+    column: &str,
     num_surrogates: usize,
 ) -> Result<SurrogateTestResult, ProfilingError> {
+    let raw = extract_f64_values(df, column)?;
     if raw.len() < 10 {
         return Err(ProfilingError::InsufficientData(10));
     }
 
     // Detrend to remove linear drift that corrupts the null surrogates.
-    let vals = detrend(raw);
+    let vals = detrend(&raw);
     let n = vals.len();
 
     let stat_real = time_reversal_asymmetry(&vals);
@@ -193,10 +197,12 @@ fn shuffle_with_lcg(data: &[f64], seed: &mut u64) -> Vec<f64> {
 /// indicates nonlinear dependence. `epsilon` is typically set to
 /// 0.5–2.0 × the standard deviation of the series.
 pub fn bds_test(
-    raw: &[f64],
+    df: &DataFrame,
+    column: &str,
     embedding_dim: usize,
     epsilon: f64,
 ) -> Result<BdsTestResult, ProfilingError> {
+    let raw = extract_f64_values(df, column)?;
     let n = raw.len();
     if n < 20 {
         return Err(ProfilingError::InsufficientData(20));
@@ -206,7 +212,7 @@ pub fn bds_test(
     }
 
     // Detrend to avoid false positives from simple linear drift.
-    let vals = detrend(raw);
+    let vals = detrend(&raw);
 
     let c1 = correlation_integral(&vals, 1, epsilon);
     let cm = correlation_integral(&vals, embedding_dim, epsilon);
@@ -287,12 +293,14 @@ fn triple_correlation(x: &[f64], eps: f64) -> f64 {
 ///
 /// A positive value indicates chaos, which is favourable for reservoir
 /// computing. `embedding_dim` is typically 2–10 and `tau` is the delay
-/// (often 1 or from `delay_embedding`).
+/// (often 1.or from `delay_embedding`).
 pub fn lyapunov_exponent(
-    vals: &[f64],
+    df: &DataFrame,
+    column: &str,
     embedding_dim: usize,
     tau: usize,
 ) -> Result<f64, ProfilingError> {
+    let vals = extract_f64_values(df, column)?;
     let n = vals.len();
     let n_vec = n.saturating_sub((embedding_dim - 1) * tau);
     if n_vec < 20 {
@@ -401,9 +409,11 @@ fn linear_slope(pts: &[(f64, f64)]) -> f64 {
 /// the Gaussian-equivalent MI by more than 50 %, indicating structure
 /// that a linear model cannot capture.
 pub fn dependence_comparison(
-    vals: &[f64],
+    df: &DataFrame,
+    column: &str,
     max_lag: usize,
 ) -> Result<DependenceComparison, ProfilingError> {
+    let vals = extract_f64_values(df, column)?;
     if vals.len() < max_lag + 10 {
         return Err(ProfilingError::InsufficientData(max_lag + 10));
     }
@@ -507,9 +517,11 @@ fn binned_mutual_information(x: &[f64], y: &[f64]) -> f64 {
 /// * Optimal delay — first minimum of average mutual information.
 /// * Embedding dimension — false nearest neighbours (FNN) method.
 pub fn delay_embedding(
-    vals: &[f64],
+    df: &DataFrame,
+    column: &str,
     max_dim: usize,
 ) -> Result<DelayEmbedding, ProfilingError> {
+    let vals = extract_f64_values(df, column)?;
     if vals.len() < 50 {
         return Err(ProfilingError::InsufficientData(50));
     }
@@ -533,7 +545,7 @@ pub fn delay_embedding(
         if n_check < 20 {
             break;
         }
-        let fnn = false_nearest_neighbours(vals, dim, tau, fnn_threshold);
+        let fnn = false_nearest_neighbours(&vals, dim, tau, fnn_threshold);
         if fnn < 0.01 {
             best_dim = dim;
             break;
@@ -617,14 +629,16 @@ fn false_nearest_neighbours(x: &[f64], dim: usize, tau: usize, threshold: f64) -
 /// * `memory_length` — last lag where |PACF| exceeds the 2/√N significance
 ///   threshold, indicating how deep the temporal memory extends.
 pub fn memory_profile(
-    vals: &[f64],
+    df: &DataFrame,
+    column: &str,
     max_lag: usize,
 ) -> Result<MemoryProfile, ProfilingError> {
+    let vals = extract_f64_values(df, column)?;
     if vals.len() < max_lag + 10 {
         return Err(ProfilingError::InsufficientData(max_lag + 10));
     }
 
-    let pacf = durbin_levinson(vals, max_lag);
+    let pacf = durbin_levinson(&vals, max_lag);
 
     let dmi: Vec<f64> = (1..=max_lag)
         .map(|lag| binned_mutual_information(&vals[..vals.len() - lag], &vals[lag..]))
@@ -724,18 +738,18 @@ mod tests {
     use super::*;
 
     /// Logistic map at r = 3.9 (chaotic regime).
-    fn logistic_map(n: usize) -> Vec<f64> {
+    fn logistic_map(n: usize) -> DataFrame {
         let mut x = vec![0.0f64; n];
         x[0] = 0.1;
         let r = 3.9;
         for i in 1..n {
             x[i] = r * x[i - 1] * (1.0 - x[i - 1]);
         }
-        x
+        df! { "x" => &x }.unwrap()
     }
 
     /// AR(1) with φ = 0.5 and small noise.
-    fn linear_series(n: usize) -> Vec<f64> {
+    fn linear_series(n: usize) -> DataFrame {
         let mut x = vec![0.0f64; n];
         let mut seed: u64 = 42;
         for i in 1..n {
@@ -743,33 +757,35 @@ mod tests {
             let noise = (seed as f64 / u64::MAX as f64 - 0.5) * 0.1;
             x[i] = 0.5 * x[i - 1] + noise;
         }
-        x
+        df! { "x" => &x }.unwrap()
     }
 
     /// Pure sine wave.
-    fn sine_wave(n: usize) -> Vec<f64> {
-        (0..n).map(|i| (i as f64 * 0.1).sin()).collect()
+    fn sine_wave(n: usize) -> DataFrame {
+        let x: Vec<f64> = (0..n).map(|i| (i as f64 * 0.1).sin()).collect();
+        df! { "x" => &x }.unwrap()
     }
 
     /// Pure linear ramp (should NOT be flagged as nonlinear after detrending).
-    fn pure_trend(n: usize) -> Vec<f64> {
-        (0..n).map(|i| i as f64 * 0.5).collect()
+    fn pure_trend(n: usize) -> DataFrame {
+        let x: Vec<f64> = (0..n).map(|i| i as f64 * 0.5).collect();
+        df! { "x" => &x }.unwrap()
     }
 
     // -- Surrogate test --
 
     #[test]
     fn test_surrogate_logistic_detects_nonlinearity() {
-        let vals = logistic_map(1000);
-        let result = surrogate_test(&vals, 100).unwrap();
+        let df = logistic_map(1000);
+        let result = surrogate_test(&df, "x", 100).unwrap();
         assert!(result.z_score.abs() > 2.0);
         assert!(result.is_nonlinear);
     }
 
     #[test]
     fn test_surrogate_trend_not_nonlinear() {
-        let vals = pure_trend(500);
-        let result = surrogate_test(&vals, 100).unwrap();
+        let df = pure_trend(500);
+        let result = surrogate_test(&df, "x", 100).unwrap();
         assert!(
             result.z_score.abs() < 5.0,
             "Pure trend should not have extreme z-score after detrending, got {}",
@@ -781,15 +797,15 @@ mod tests {
 
     #[test]
     fn test_bds_logistic() {
-        let vals = logistic_map(500);
-        let result = bds_test(&vals, 3, 0.5).unwrap();
+        let df = logistic_map(500);
+        let result = bds_test(&df, "x", 3, 0.5).unwrap();
         assert!(result.p_value < 0.05);
     }
 
     #[test]
     fn test_bds_returns_valid() {
-        let vals = linear_series(500);
-        let result = bds_test(&vals, 2, 0.05).unwrap();
+        let df = linear_series(500);
+        let result = bds_test(&df, "x", 2, 0.05).unwrap();
         assert!(result.p_value >= 0.0 && result.p_value <= 1.0);
         assert!(result.statistic.is_finite());
     }
@@ -798,8 +814,8 @@ mod tests {
 
     #[test]
     fn test_lyapunov_logistic_positive() {
-        let vals = logistic_map(2000);
-        let l = lyapunov_exponent(&vals, 3, 1).unwrap();
+        let df = logistic_map(2000);
+        let l = lyapunov_exponent(&df, "x", 3, 1).unwrap();
         assert!(l > 0.0, "Lyapunov exponent should be positive for logistic map, got {l}");
     }
 
@@ -807,16 +823,16 @@ mod tests {
 
     #[test]
     fn test_dependence_comparison_lengths() {
-        let vals = logistic_map(1000);
-        let result = dependence_comparison(&vals, 10).unwrap();
+        let df = logistic_map(1000);
+        let result = dependence_comparison(&df, "x", 10).unwrap();
         assert_eq!(result.autocorrelations.len(), 10);
         assert_eq!(result.mutual_informations.len(), 10);
     }
 
     #[test]
     fn test_dependence_mi_positive() {
-        let vals = logistic_map(1000);
-        let result = dependence_comparison(&vals, 5).unwrap();
+        let df = logistic_map(1000);
+        let result = dependence_comparison(&df, "x", 5).unwrap();
         for mi in &result.mutual_informations {
             assert!(*mi >= 0.0);
         }
@@ -826,8 +842,8 @@ mod tests {
 
     #[test]
     fn test_delay_embedding_sine() {
-        let vals = sine_wave(500);
-        let result = delay_embedding(&vals, 10).unwrap();
+        let df = sine_wave(500);
+        let result = delay_embedding(&df, "x", 10).unwrap();
         assert!(result.optimal_delay >= 1);
         assert!(result.embedding_dimension >= 1);
     }
@@ -836,8 +852,8 @@ mod tests {
 
     #[test]
     fn test_memory_profile_ar() {
-        let vals = linear_series(1000);
-        let result = memory_profile(&vals, 10).unwrap();
+        let df = linear_series(1000);
+        let result = memory_profile(&df, "x", 10).unwrap();
         assert_eq!(result.partial_autocorrelations.len(), 10);
         assert_eq!(result.delay_mutual_informations.len(), 10);
         // AR(1) with phi=0.5 should have significant PACF at lag 1
@@ -847,8 +863,8 @@ mod tests {
 
     #[test]
     fn test_memory_ais_positive() {
-        let vals = logistic_map(1000);
-        let result = memory_profile(&vals, 10).unwrap();
+        let df = logistic_map(1000);
+        let result = memory_profile(&df, "x", 10).unwrap();
         assert!(result.active_information_storage > 0.0);
     }
 

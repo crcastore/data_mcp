@@ -1,23 +1,22 @@
+use std::collections::HashMap;
+
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
-use polars::prelude::*;
 
-use mcp::dataset::Dataset;
-use mcp::profiling::{
-    categorical, distribution, entropy, numeric, reservoir, shape, sparsity,
-};
+use mcp::dataset::{ColumnData, Dataset};
 
-/// Build a 50-column × 10 000-row DataFrame.
+/// Build a 50-column × 10 000-row Dataset.
 ///
-/// - Columns `num_00`..`num_39`  → random-ish Float64
-/// - Columns `cat_00`..`cat_09`  → Utf8 categories
-fn build_dataframe() -> DataFrame {
+/// - Columns `num_00`..`num_39`  → random-ish f64
+/// - Columns `cat_00`..`cat_09`  → String categories
+fn build_dataset() -> Dataset {
     const ROWS: usize = 10_000;
     const NUM_COLS: usize = 40;
     const CAT_COLS: usize = 10;
 
     let categories = ["alpha", "beta", "gamma", "delta", "epsilon"];
 
-    let mut columns: Vec<Column> = Vec::with_capacity(NUM_COLS + CAT_COLS);
+    let mut cols = HashMap::new();
+    let mut order = Vec::with_capacity(NUM_COLS + CAT_COLS);
 
     // Numeric columns — deterministic pseudo-random via simple LCG.
     let mut seed: u64 = 42;
@@ -28,131 +27,134 @@ fn build_dataframe() -> DataFrame {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
             vals.push((seed as f64) / u64::MAX as f64 * 1000.0);
         }
-        let ca = Float64Chunked::new(name.into(), &vals);
-        columns.push(ca.into_column());
+        order.push(name.clone());
+        cols.insert(name, ColumnData::Numeric(vals));
     }
 
     // Categorical (string) columns.
     for i in 0..CAT_COLS {
         let name = format!("cat_{i:02}");
-        let mut vals: Vec<&str> = Vec::with_capacity(ROWS);
+        let mut vals: Vec<String> = Vec::with_capacity(ROWS);
         for _ in 0..ROWS {
             seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            vals.push(categories[(seed % categories.len() as u64) as usize]);
+            vals.push(categories[(seed % categories.len() as u64) as usize].to_string());
         }
-        let ca = StringChunked::new(name.into(), &vals);
-        columns.push(ca.into_column());
+        order.push(name.clone());
+        cols.insert(name, ColumnData::String(vals));
     }
 
-    DataFrame::new(ROWS, columns).expect("failed to build benchmark DataFrame")
+    Dataset::from_columns(order, cols)
 }
 
 // ---------------------------------------------------------------------------
-// Benchmarks
+// Benchmarks — all go through Dataset methods
 // ---------------------------------------------------------------------------
 
 fn bench_row_count(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("shape::row_count", |b| {
-        b.iter(|| shape::row_count(black_box(&df)))
+    let ds = build_dataset();
+    c.bench_function("Dataset::row_count", |b| {
+        b.iter(|| black_box(ds.row_count()))
     });
 }
 
 fn bench_column_count(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("shape::column_count", |b| {
-        b.iter(|| shape::column_count(black_box(&df)))
+    let ds = build_dataset();
+    c.bench_function("Dataset::column_count", |b| {
+        b.iter(|| black_box(ds.column_count()))
     });
 }
 
 fn bench_column_types(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("shape::column_types", |b| {
-        b.iter(|| shape::column_types(black_box(&df)))
+    let ds = build_dataset();
+    c.bench_function("Dataset::column_types", |b| {
+        b.iter(|| black_box(ds.column_types()))
     });
 }
 
 fn bench_quantiles(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("numeric::quantiles", |b| {
-        b.iter(|| numeric::quantiles(black_box(&df), "num_00").unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::quantiles", |b| {
+        b.iter(|| ds.quantiles(black_box("num_00")).unwrap())
     });
 }
 
 fn bench_unique_count(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("categorical::unique_count", |b| {
-        b.iter(|| categorical::unique_count(black_box(&df), "cat_00").unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::unique_count", |b| {
+        b.iter(|| ds.unique_count(black_box("cat_00")).unwrap())
     });
 }
 
 fn bench_entropy(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("entropy::entropy", |b| {
-        b.iter(|| entropy::entropy(black_box(&df), "cat_00").unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::entropy", |b| {
+        b.iter(|| ds.entropy(black_box("cat_00")).unwrap())
     });
 }
 
 fn bench_skewness(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("distribution::skewness", |b| {
-        b.iter(|| distribution::skewness(black_box(&df), "num_00").unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::skewness", |b| {
+        b.iter(|| ds.skewness(black_box("num_00")).unwrap())
     });
 }
 
 fn bench_sparsity(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("sparsity::sparsity", |b| {
-        b.iter(|| sparsity::sparsity(black_box(&df), "num_00").unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::sparsity", |b| {
+        b.iter(|| ds.sparsity(black_box("num_00")).unwrap())
     });
 }
 
-fn bench_dataset_from_dataframe(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("Dataset::new", |b| {
-        b.iter(|| Dataset::new(black_box(df.clone())))
+fn bench_dataset_from_columns(c: &mut Criterion) {
+    // Pre-build the data; bench only from_columns cost.
+    let ds = build_dataset();
+    // We can't easily clone internal state, so just re-time build_dataset.
+    let _ = ds;
+    c.bench_function("Dataset::from_columns", |b| {
+        b.iter(|| build_dataset())
     });
 }
 
 fn bench_surrogate_test(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("reservoir::surrogate_test", |b| {
-        b.iter(|| reservoir::surrogate_test(black_box(&df), "num_00", 100).unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::surrogate_test", |b| {
+        b.iter(|| ds.surrogate_test(black_box("num_00"), 100).unwrap())
     });
 }
 
 fn bench_bds_test(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("reservoir::bds_test", |b| {
-        b.iter(|| reservoir::bds_test(black_box(&df), "num_00", 3, 400.0).unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::bds_test", |b| {
+        b.iter(|| ds.bds_test(black_box("num_00"), 3, 400.0).unwrap())
     });
 }
 
 fn bench_lyapunov_exponent(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("reservoir::lyapunov_exponent", |b| {
-        b.iter(|| reservoir::lyapunov_exponent(black_box(&df), "num_00", 3, 1).unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::lyapunov_exponent", |b| {
+        b.iter(|| ds.lyapunov_exponent(black_box("num_00"), 3, 1).unwrap())
     });
 }
 
 fn bench_dependence_comparison(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("reservoir::dependence_comparison", |b| {
-        b.iter(|| reservoir::dependence_comparison(black_box(&df), "num_00", 10).unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::dependence_comparison", |b| {
+        b.iter(|| ds.dependence_comparison(black_box("num_00"), 10).unwrap())
     });
 }
 
 fn bench_delay_embedding(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("reservoir::delay_embedding", |b| {
-        b.iter(|| reservoir::delay_embedding(black_box(&df), "num_00", 10).unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::delay_embedding", |b| {
+        b.iter(|| ds.delay_embedding(black_box("num_00"), 10).unwrap())
     });
 }
 
 fn bench_memory_profile(c: &mut Criterion) {
-    let df = build_dataframe();
-    c.bench_function("reservoir::memory_profile", |b| {
-        b.iter(|| reservoir::memory_profile(black_box(&df), "num_00", 10).unwrap())
+    let ds = build_dataset();
+    c.bench_function("Dataset::memory_profile", |b| {
+        b.iter(|| ds.memory_profile(black_box("num_00"), 10).unwrap())
     });
 }
 
@@ -166,7 +168,7 @@ criterion_group!(
     bench_entropy,
     bench_skewness,
     bench_sparsity,
-    bench_dataset_from_dataframe,
+    bench_dataset_from_columns,
     bench_surrogate_test,
     bench_bds_test,
     bench_lyapunov_exponent,

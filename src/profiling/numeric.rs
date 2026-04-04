@@ -1,8 +1,6 @@
-use polars::prelude::*;
 use serde::Serialize;
 
 use crate::error::ProfilingError;
-use crate::util::extract_f64_values;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Quantiles {
@@ -14,19 +12,13 @@ pub struct Quantiles {
 }
 
 /// Min, Q25, median, Q75, max via linear interpolation (numpy default).
-pub fn quantiles(df: &DataFrame, column: &str) -> Result<Quantiles, ProfilingError> {
-    let mut vals = extract_f64_values(df, column)?;
+pub fn quantiles(vals: &[f64]) -> Result<Quantiles, ProfilingError> {
     if vals.is_empty() {
         return Err(ProfilingError::EmptyDataset);
     }
-    vals.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(Quantiles {
-        min: vals[0],
-        q25: lerp_percentile(&vals, 0.25),
-        q50: lerp_percentile(&vals, 0.50),
-        q75: lerp_percentile(&vals, 0.75),
-        max: vals[vals.len() - 1],
-    })
+    let mut sorted = vals.to_vec();
+    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    Ok(quantiles_from_sorted(&sorted))
 }
 
 /// Build Quantiles from an already-sorted slice.
@@ -56,23 +48,13 @@ fn lerp_percentile(sorted: &[f64], p: f64) -> f64 {
 mod tests {
     use super::*;
 
-    fn df_nums() -> DataFrame {
-        df! { "x" => &[1.0f64, 2.0, 3.0, 4.0, 5.0] }.unwrap()
-    }
-
     #[test]
     fn test_quantiles() {
-        let q = quantiles(&df_nums(), "x").unwrap();
+        let q = quantiles(&[1.0, 2.0, 3.0, 4.0, 5.0]).unwrap();
         assert!((q.min - 1.0).abs() < 1e-10);
         assert!((q.q50 - 3.0).abs() < 1e-10);
         assert!((q.max - 5.0).abs() < 1e-10);
         assert!(q.q25 >= q.min && q.q25 <= q.q50);
         assert!(q.q75 >= q.q50 && q.q75 <= q.max);
-    }
-
-    #[test]
-    fn test_not_numeric() {
-        let df = df! { "s" => &["a", "b"] }.unwrap();
-        assert!(quantiles(&df, "s").is_err());
     }
 }

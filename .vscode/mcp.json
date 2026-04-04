@@ -1,0 +1,8 @@
+{
+  "servers": {
+    "data-profiler": {
+      "type": "stdio",
+      "command": "${workspaceFolder}/target/release/mcp"
+    }
+  }
+}
