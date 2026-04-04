@@ -1,9 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::process::Command;
 
+use arrow::array::{Array, AsArray};
+use arrow::datatypes::Float64Type;
 use faer::Mat;
 use ndarray::Array2;
 use ndarray_stats::CorrelationExt;
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::error::ProfilingError;
 use crate::profiling;
@@ -207,43 +211,77 @@ pub struct Dataset {
 
 impl Dataset {
     pub fn from_csv<P: AsRef<Path>>(path: P) -> Result<Self, ProfilingError> {
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .from_path(path)?;
+        let csv_path = path.as_ref();
+        let parquet_path = csv_path.with_extension("parquet");
 
-        let headers: Vec<String> = reader
-            .headers()?
-            .iter()
-            .map(|h| h.to_string())
-            .collect();
+        // Use duckdb CLI to convert CSV → Parquet.
+        let query = format!(
+            "COPY (SELECT * FROM read_csv_auto('{}')) TO '{}' (FORMAT PARQUET);",
+            csv_path.display(),
+            parquet_path.display(),
+        );
+        let output = Command::new("duckdb")
+            .args(["-c", &query])
+            .output()?;
 
-        let ncols = headers.len();
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ProfilingError::DuckDb(stderr.into_owned()));
+        }
 
-        // Accumulate raw string values per column.
-        let mut raw_cols: Vec<Vec<String>> = vec![Vec::new(); ncols];
-        for result in reader.records() {
-            let record = result?;
-            for (j, field) in record.iter().enumerate() {
-                if j < ncols {
-                    raw_cols[j].push(field.to_string());
+        // Read the Parquet file via arrow.
+        let file = std::fs::File::open(&parquet_path)?;
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        let reader = builder.build()?;
+
+        let mut headers: Vec<String> = Vec::new();
+        let mut columns: HashMap<String, Vec<f64>> = HashMap::new();
+        let mut headers_set = false;
+
+        for batch in reader {
+            let batch = batch?;
+            if !headers_set {
+                headers = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|f| f.name().clone())
+                    .collect();
+                for name in &headers {
+                    columns.insert(name.clone(), Vec::new());
+                }
+                headers_set = true;
+            }
+
+            for (j, name) in headers.iter().enumerate() {
+                let col = batch.column(j);
+                // Try to downcast to Float64; fall back to casting.
+                let f64_arr = col
+                    .as_primitive_opt::<Float64Type>()
+                    .cloned()
+                    .or_else(|| {
+                        arrow::compute::cast(col, &arrow::datatypes::DataType::Float64)
+                            .ok()
+                            .and_then(|a| a.as_primitive_opt::<Float64Type>().cloned())
+                    });
+
+                if let Some(arr) = f64_arr {
+                    let vals = columns.get_mut(name).unwrap();
+                    for i in 0..arr.len() {
+                        vals.push(if arr.is_null(i) { 0.0 } else { arr.value(i) });
+                    }
+                } else {
+                    // Non-numeric column: push zeros.
+                    let vals = columns.get_mut(name).unwrap();
+                    vals.resize(vals.len() + batch.num_rows(), 0.0);
                 }
             }
         }
 
-        let nrows = raw_cols.first().map_or(0, |c| c.len());
+        // Clean up temporary parquet file.
+        let _ = std::fs::remove_file(&parquet_path);
 
-        // Parse all columns as f64. Non-parseable / empty values become 0.0.
-        let mut columns = HashMap::with_capacity(ncols);
-
-        for (j, name) in headers.iter().enumerate() {
-            let raw = &raw_cols[j];
-            let vals: Vec<f64> = raw
-                .iter()
-                .map(|s| s.trim().parse::<f64>().unwrap_or(0.0))
-                .collect();
-            columns.insert(name.clone(), vals);
-        }
-
+        let nrows = columns.values().next().map_or(0, |v| v.len());
         let stats = precompute(&headers, &columns, nrows);
 
         Ok(Self {
