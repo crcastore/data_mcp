@@ -1,4 +1,3 @@
-pub mod categorical;
 pub mod correlation;
 pub mod distribution;
 pub mod entropy;

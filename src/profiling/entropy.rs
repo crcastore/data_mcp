@@ -10,42 +10,47 @@ pub fn entropy_numeric(vals: &[f64]) -> Result<f64, ProfilingError> {
         return Err(ProfilingError::EmptyDataset);
     }
 
-    let mut sorted = vals.to_vec();
-    sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mut buf = vals.to_vec();
+    let cmp = |a: &f64, b: &f64| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal);
 
-    let min = sorted[0];
-    let max = sorted[sorted.len() - 1];
+    // O(n) min/max via scan.
+    let min = buf.iter().copied().reduce(f64::min).unwrap();
+    let max = buf.iter().copied().reduce(f64::max).unwrap();
 
     // Single-value column → entropy 0.
     if (max - min).abs() < f64::EPSILON {
         return Ok(0.0);
     }
 
-    // Freedman–Diaconis bin width: 2 × IQR × n^(-1/3), with a floor of
-    // Sturges' rule (ceil(log2(n)) + 1) bins.
-    let q1 = sorted[sorted.len() / 4];
-    let q3 = sorted[3 * sorted.len() / 4];
+    // O(n) quickselect for Q1 and Q3 (Freedman–Diaconis bin width).
+    let n = buf.len();
+    let q1_idx = n / 4;
+    let q3_idx = 3 * n / 4;
+    buf.select_nth_unstable_by(q1_idx, cmp);
+    let q1 = buf[q1_idx];
+    buf[q1_idx..].select_nth_unstable_by(q3_idx - q1_idx, cmp);
+    let q3 = buf[q3_idx];
     let iqr = q3 - q1;
 
     let num_bins = if iqr > f64::EPSILON {
-        let bin_width = 2.0 * iqr * (sorted.len() as f64).powf(-1.0 / 3.0);
+        let bin_width = 2.0 * iqr * (n as f64).powf(-1.0 / 3.0);
         let fd_bins = ((max - min) / bin_width).ceil() as usize;
         fd_bins.max(2)
     } else {
         // IQR ≈ 0 → fall back to Sturges' rule.
-        ((sorted.len() as f64).log2().ceil() as usize) + 1
+        ((n as f64).log2().ceil() as usize) + 1
     };
 
     let bin_width = (max - min) / num_bins as f64;
 
     let mut counts = vec![0usize; num_bins];
-    for &v in &sorted {
+    for &v in vals {
         let idx = ((v - min) / bin_width).floor() as usize;
         let idx = idx.min(num_bins - 1);
         counts[idx] += 1;
     }
 
-    let nf = sorted.len() as f64;
+    let nf = n as f64;
     let h: f64 = counts
         .iter()
         .filter(|&&c| c > 0)

@@ -60,13 +60,6 @@ fn bench_quantiles(c: &mut Criterion) {
     });
 }
 
-fn bench_unique_count(c: &mut Criterion) {
-    let ds = build_dataset();
-    c.bench_function("Dataset::unique_count", |b| {
-        b.iter(|| ds.unique_count(black_box("col_00")).unwrap())
-    });
-}
-
 fn bench_entropy(c: &mut Criterion) {
     let ds = build_dataset();
     c.bench_function("Dataset::entropy", |b| {
@@ -146,7 +139,6 @@ criterion_group!(
     bench_column_count,
     bench_column_types,
     bench_quantiles,
-    bench_unique_count,
     bench_entropy,
     bench_skewness,
     bench_sparsity,

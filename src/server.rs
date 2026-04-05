@@ -182,13 +182,6 @@ impl McpServer {
                 Ok(json!({"column": c, "skewness": v}).to_string())
             }
 
-            // --- Categorical ---
-            "unique_count" => {
-                let c = get_str(args, "column")?;
-                let v = ds.unique_count(c).map_err(|e| e.to_string())?;
-                Ok(json!({"column": c, "unique_count": v}).to_string())
-            }
-
             // --- Entropy ---
             "entropy" => {
                 let c = get_str(args, "column")?;
@@ -371,17 +364,6 @@ fn tools_schema() -> Value {
         {
             "name": "skewness",
             "description": "Adjusted Fisher-Pearson skewness of a numeric column.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Column name" }
-                },
-                "required": ["column"]
-            }
-        },
-        {
-            "name": "unique_count",
-            "description": "Number of distinct values in a numeric column.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

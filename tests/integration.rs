@@ -56,11 +56,6 @@ fn test_skewness_reasonable() {
 }
 
 #[test]
-fn test_unique_count_id() {
-    assert_eq!(sample_ds().unique_count("id").unwrap(), 10);
-}
-
-#[test]
 fn test_entropy_positive() {
     let h = sample_ds().entropy("age").unwrap();
     assert!(h > 0.0);

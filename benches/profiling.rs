@@ -72,9 +72,6 @@ fn bench_compute(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("skewness", n), &ds, |b, ds| {
             b.iter(|| ds.skewness("val").unwrap());
         });
-        group.bench_with_input(BenchmarkId::new("unique_count", n), &ds, |b, ds| {
-            b.iter(|| ds.unique_count("val").unwrap());
-        });
         group.bench_with_input(BenchmarkId::new("entropy", n), &ds, |b, ds| {
             b.iter(|| ds.entropy("val").unwrap());
         });

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 
@@ -346,9 +346,7 @@ impl Dataset {
         if vals.is_empty() {
             return Err(ProfilingError::EmptyDataset);
         }
-        let mut sorted = vals.to_vec();
-        sorted.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(profiling::numeric::quantiles_from_sorted(&sorted))
+        Ok(profiling::numeric::quantiles_select(vals))
     }
 
     // --- Distribution (uses cached mean) ---
@@ -357,14 +355,6 @@ impl Dataset {
         let vals = self.get_column(column)?;
         let mean = self.stats.means[column];
         profiling::distribution::skewness_from_vals(vals, mean)
-    }
-
-    // --- Unique count ---
-
-    pub fn unique_count(&self, column: &str) -> Result<usize, ProfilingError> {
-        let vals = self.get_column(column)?;
-        let set: HashSet<u64> = vals.iter().map(|v| v.to_bits()).collect();
-        Ok(set.len())
     }
 
     // --- Entropy ---
