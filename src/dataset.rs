@@ -19,6 +19,14 @@ struct PrecomputedStats {
     means: HashMap<String, f64>,
     /// Column name → sample variance (ddof=1).
     variances: HashMap<String, f64>,
+    /// Column name → skewness.
+    skewness: HashMap<String, f64>,
+    /// Column name → entropy.
+    entropy: HashMap<String, f64>,
+    /// Column name → quantiles.
+    quantiles: HashMap<String, Quantiles>,
+    /// Column name → sparsity.
+    sparsity: HashMap<String, f64>,
     /// Full covariance matrix.
     covariance: CovarianceMatrix,
     /// Pearson correlation matrix.
@@ -96,6 +104,40 @@ fn precompute(
     let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
     for (j, name) in col_order.iter().enumerate() {
         means.insert(name.clone(), mean_row[j]);
+    }
+
+    // Per-column stats: skewness, entropy, quantiles, sparsity.
+    // Compute all in one loop to avoid repeated HashMap lookups.
+    let mut skewness_map: HashMap<String, f64> = HashMap::with_capacity(m);
+    let mut entropy_map: HashMap<String, f64> = HashMap::with_capacity(m);
+    let mut quantiles_map: HashMap<String, Quantiles> = HashMap::with_capacity(m);
+    let mut sparsity_map: HashMap<String, f64> = HashMap::with_capacity(m);
+
+    for name in col_order.iter() {
+        if let Some(vals) = columns.get(name) {
+            let mean = means[name];
+
+            // Skewness
+            if let Ok(s) = profiling::distribution::skewness_from_vals(vals, mean) {
+                skewness_map.insert(name.clone(), s);
+            }
+
+            // Entropy
+            if let Ok(e) = profiling::entropy::entropy_numeric(vals) {
+                entropy_map.insert(name.clone(), e);
+            }
+
+            // Quantiles
+            if !vals.is_empty() {
+                quantiles_map.insert(name.clone(), profiling::numeric::quantiles_select(vals));
+            }
+
+            // Sparsity
+            if !vals.is_empty() {
+                let zero_count = vals.iter().filter(|&&v| v == 0.0).count();
+                sparsity_map.insert(name.clone(), zero_count as f64 / vals.len() as f64);
+            }
+        }
     }
 
     // Covariance via BLAS-accelerated matrix multiply: Cᵀ·C / (n-1).
@@ -195,6 +237,10 @@ fn precompute(
     PrecomputedStats {
         means,
         variances,
+        skewness: skewness_map,
+        entropy: entropy_map,
+        quantiles: quantiles_map,
+        sparsity: sparsity_map,
         covariance,
         correlation,
         svd,
@@ -345,26 +391,31 @@ impl Dataset {
     }
 
     pub fn quantiles(&self, column: &str) -> Result<Quantiles, ProfilingError> {
-        let vals = self.get_column(column)?;
-        if vals.is_empty() {
-            return Err(ProfilingError::EmptyDataset);
-        }
-        Ok(profiling::numeric::quantiles_select(vals))
+        self.stats
+            .quantiles
+            .get(column)
+            .cloned()
+            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
     }
 
-    // --- Distribution (uses cached mean) ---
+    // --- Distribution (cached) ---
 
     pub fn skewness(&self, column: &str) -> Result<f64, ProfilingError> {
-        let vals = self.get_column(column)?;
-        let mean = self.stats.means[column];
-        profiling::distribution::skewness_from_vals(vals, mean)
+        self.stats
+            .skewness
+            .get(column)
+            .copied()
+            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
     }
 
-    // --- Entropy ---
+    // --- Entropy (cached) ---
 
     pub fn entropy(&self, column: &str) -> Result<f64, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::entropy::entropy_numeric(vals)
+        self.stats
+            .entropy
+            .get(column)
+            .copied()
+            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
     }
 
     // --- Covariance (cached) ---
@@ -430,12 +481,11 @@ impl Dataset {
     // --- Sparsity ---
 
     pub fn sparsity(&self, column: &str) -> Result<f64, ProfilingError> {
-        let vals = self.get_column(column)?;
-        if vals.is_empty() {
-            return Err(ProfilingError::EmptyDataset);
-        }
-        let zero_count = vals.iter().filter(|&&v| v == 0.0).count();
-        Ok(zero_count as f64 / vals.len() as f64)
+        self.stats
+            .sparsity
+            .get(column)
+            .copied()
+            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
     }
 
     // --- Reservoir Computing ---
