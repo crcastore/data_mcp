@@ -5,8 +5,7 @@ use std::process::Command;
 use arrow::array::{Array, AsArray};
 use arrow::datatypes::Float64Type;
 use faer::Mat;
-use ndarray::Array2;
-use ndarray_stats::CorrelationExt;
+use ndarray::{Array2, Axis};
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::error::ProfilingError;
@@ -82,24 +81,28 @@ fn precompute(
 ) -> PrecomputedStats {
     let m = col_order.len();
 
-    let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
-
-    // Build an n×m Array2 for ndarray-stats covariance.
+    // Build an n×m Array2.
     let mut matrix = Array2::<f64>::zeros((nrows, m));
     for (j, name) in col_order.iter().enumerate() {
         if let Some(vals) = columns.get(name) {
             for (i, &v) in vals.iter().enumerate() {
                 matrix[[i, j]] = v;
             }
-            let mean = matrix.column(j).mean().unwrap_or(0.0);
-            means.insert(name.clone(), mean);
         }
     }
 
-    // Covariance matrix via ndarray-stats (ddof=1).
-    // Variances are read from the diagonal.
+    // Mean per column.
+    let mean_row = matrix.mean_axis(Axis(0)).unwrap();
+    let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
+    for (j, name) in col_order.iter().enumerate() {
+        means.insert(name.clone(), mean_row[j]);
+    }
+
+    // Covariance via BLAS-accelerated matrix multiply: Cᵀ·C / (n-1).
     let (cov_flat, corr_matrix, variances) = if m >= 2 && nrows > 1 {
-        let cov_mat = matrix.t().cov(1.0).unwrap_or_else(|_| Array2::zeros((m, m)));
+        let centered = &matrix - &mean_row;
+        let n = nrows as f64;
+        let cov_mat = centered.t().dot(&centered) / (n - 1.0);
 
         let mut flat = vec![0.0f64; m * m];
         for i in 0..m {
@@ -155,31 +158,31 @@ fn precompute(
         matrix: corr_matrix,
     };
 
-    // SVD of the covariance matrix via faer.
+    // Eigendecomposition of the symmetric covariance matrix via faer.
     let svd = if m >= 2 {
         let cov_faer = Mat::from_fn(m, m, |i, j| covariance.get(i, j));
-        match cov_faer.svd() {
+        match cov_faer.self_adjoint_eigen(faer::Side::Lower) {
             Ok(decomp) => {
                 let u_mat = decomp.U();
-                let vt_mat = decomp.V().transpose();
                 let s_diag = decomp.S();
 
-                let mut u_flat = vec![0.0f64; m * m];
+                // Eigenvalues are in nondecreasing order; reverse to descending.
+                let mut eigenvalues = vec![0.0f64; m];
                 let mut vt_flat = vec![0.0f64; m * m];
-                let mut singular_values = vec![0.0f64; m];
 
                 for i in 0..m {
-                    singular_values[i] = s_diag[i];
+                    let ri = m - 1 - i; // reversed index
+                    eigenvalues[i] = s_diag.column_vector()[ri].max(0.0);
                     for j in 0..m {
-                        u_flat[i * m + j] = u_mat[(i, j)];
-                        vt_flat[i * m + j] = vt_mat[(i, j)];
+                        // Eigenvectors are columns of U; store as rows of Vᵀ (reversed order).
+                        vt_flat[i * m + j] = u_mat[(j, ri)];
                     }
                 }
 
                 Some(SvdDecomposition {
                     columns: col_order.to_vec(),
-                    singular_values,
-                    u: u_flat,
+                    singular_values: eigenvalues,
+                    u: vt_flat.clone(),
                     vt: vt_flat,
                 })
             }
