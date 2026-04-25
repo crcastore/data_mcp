@@ -1,44 +1,29 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::Command;
 
-use arrow::array::{Array, AsArray};
-use arrow::datatypes::Float64Type;
+use duckdb::Connection;
 use faer::Mat;
-use ndarray::{Array2, Axis};
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
 use crate::error::ProfilingError;
 use crate::profiling;
 use crate::profiling::correlation::CorrelationMatrix;
 use crate::profiling::numeric::Quantiles;
 
-/// Precomputed statistics for all columns.
-struct PrecomputedStats {
-    /// Column name → arithmetic mean.
-    means: HashMap<String, f64>,
-    /// Column name → sample variance (ddof=1).
-    variances: HashMap<String, f64>,
-    /// Column name → skewness.
-    skewness: HashMap<String, f64>,
-    /// Column name → entropy.
-    entropy: HashMap<String, f64>,
-    /// Column name → quantiles.
-    quantiles: HashMap<String, Quantiles>,
-    /// Column name → sparsity.
-    sparsity: HashMap<String, f64>,
-    /// Full covariance matrix.
-    covariance: CovarianceMatrix,
-    /// Pearson correlation matrix.
-    correlation: CorrelationMatrix,
-    /// Eigendecomposition of the covariance matrix.
-    eigen: Option<EigenDecomposition>,
+// ---------------------------------------------------------------------------
+// Public types
+// ---------------------------------------------------------------------------
+
+/// Supervised prediction task type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum PredictionType {
+    Regression,
+    BinaryClassification,
+    MultiCategoryClassification,
 }
 
-/// Eigendecomposition of the covariance matrix (A = Q Λ Qᵀ).
+/// Eigendecomposition of the correlation matrix (A = Q Λ Qᵀ).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct EigenDecomposition {
-    /// Column names corresponding to the matrix axes.
     pub columns: Vec<String>,
     /// Eigenvalues in descending order (length m).
     pub eigenvalues: Vec<f64>,
@@ -46,22 +31,30 @@ pub struct EigenDecomposition {
     pub eigenvectors: Vec<f64>,
 }
 
-/// PCA result derived from the eigendecomposition of the covariance matrix.
+/// PCA result derived from the eigendecomposition of the correlation matrix.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PcaResult {
-    /// Original column names.
     pub columns: Vec<String>,
-    /// Number of components returned.
     pub n_components: usize,
-    /// Eigenvalues (variance explained by each component).
     pub explained_variance: Vec<f64>,
-    /// Fraction of total variance explained by each component.
     pub explained_variance_ratio: Vec<f64>,
-    /// Cumulative explained variance ratio.
     pub cumulative_variance_ratio: Vec<f64>,
     /// Principal component loadings, flat row-major n_components × m.
-    /// Each row is a principal component (eigenvector).
     pub components: Vec<f64>,
+}
+
+/// Data split for supervised ML: X design matrix and y target vector.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SupervisedLearningData {
+    pub prediction_type: PredictionType,
+    pub feature_columns: Vec<String>,
+    pub target_column: String,
+    pub nrows: usize,
+    pub nfeatures: usize,
+    /// Design matrix values in flat row-major layout (nrows × nfeatures).
+    pub x: Vec<f64>,
+    /// Target/predictor vector (length nrows).
+    pub y: Vec<f64>,
 }
 
 /// Raw covariance matrix stored alongside column names.
@@ -79,276 +72,285 @@ impl CovarianceMatrix {
     }
 }
 
-/// Precompute mean, covariance, correlation, and variance using ndarray-stats.
-fn precompute(
-    col_order: &[String],
-    columns: &HashMap<String, Vec<f64>>,
-    nrows: usize,
-) -> PrecomputedStats {
-    let m = col_order.len();
+// ---------------------------------------------------------------------------
+// Internal stats cache
+// ---------------------------------------------------------------------------
 
-    // Build an n×m Array2.
-    let mut matrix = Array2::<f64>::zeros((nrows, m));
-    for (j, name) in col_order.iter().enumerate() {
-        if let Some(vals) = columns.get(name) {
-            for (i, &v) in vals.iter().enumerate() {
-                matrix[[i, j]] = v;
-            }
-        }
-    }
-
-    // Mean per column.
-    let mean_row = matrix.mean_axis(Axis(0)).unwrap();
-    let mut means: HashMap<String, f64> = HashMap::with_capacity(m);
-    for (j, name) in col_order.iter().enumerate() {
-        means.insert(name.clone(), mean_row[j]);
-    }
-
-    // Per-column stats: skewness, entropy, quantiles, sparsity.
-    // Compute all in one loop to avoid repeated HashMap lookups.
-    let mut skewness_map: HashMap<String, f64> = HashMap::with_capacity(m);
-    let mut entropy_map: HashMap<String, f64> = HashMap::with_capacity(m);
-    let mut quantiles_map: HashMap<String, Quantiles> = HashMap::with_capacity(m);
-    let mut sparsity_map: HashMap<String, f64> = HashMap::with_capacity(m);
-
-    for name in col_order.iter() {
-        if let Some(vals) = columns.get(name) {
-            let mean = means[name];
-
-            // Skewness
-            if let Ok(s) = profiling::distribution::skewness_from_vals(vals, mean) {
-                skewness_map.insert(name.clone(), s);
-            }
-
-            // Entropy
-            if let Ok(e) = profiling::entropy::entropy_numeric(vals) {
-                entropy_map.insert(name.clone(), e);
-            }
-
-            // Quantiles
-            if !vals.is_empty() {
-                quantiles_map.insert(name.clone(), profiling::numeric::quantiles_select(vals));
-            }
-
-            // Sparsity
-            if !vals.is_empty() {
-                let zero_count = vals.iter().filter(|&&v| v == 0.0).count();
-                sparsity_map.insert(name.clone(), zero_count as f64 / vals.len() as f64);
-            }
-        }
-    }
-
-    // Covariance via BLAS-accelerated matrix multiply: Cᵀ·C / (n-1).
-    let (cov_flat, corr_matrix, variances) = if m >= 2 && nrows > 1 {
-        let centered = &matrix - &mean_row;
-        let n = nrows as f64;
-        let cov_mat = centered.t().dot(&centered) / (n - 1.0);
-
-        let mut flat = vec![0.0f64; m * m];
-        for i in 0..m {
-            for j in 0..m {
-                flat[i * m + j] = cov_mat[[i, j]];
-            }
-        }
-
-        // Variances from the diagonal.
-        let mut vars: HashMap<String, f64> = HashMap::with_capacity(m);
-        for (j, name) in col_order.iter().enumerate() {
-            vars.insert(name.clone(), cov_mat[[j, j]]);
-        }
-
-        // Correlation from covariance.
-        let mut corr = vec![vec![0.0f64; m]; m];
-        for i in 0..m {
-            corr[i][i] = 1.0;
-            for j in (i + 1)..m {
-                let denom = (cov_mat[[i, i]] * cov_mat[[j, j]]).sqrt();
-                let r = if denom == 0.0 {
-                    0.0
-                } else {
-                    cov_mat[[i, j]] / denom
-                };
-                corr[i][j] = r;
-                corr[j][i] = r;
-            }
-        }
-        (flat, corr, vars)
-    } else if m == 1 {
-        // Single column — compute variance directly.
-        let var = if nrows > 1 {
-            let mean = means[&col_order[0]];
-            matrix.column(0).mapv(|x| (x - mean).powi(2)).sum() / (nrows - 1) as f64
-        } else {
-            0.0
-        };
-        let mut vars = HashMap::new();
-        vars.insert(col_order[0].clone(), var);
-        (vec![var], vec![vec![1.0]], vars)
-    } else {
-        (vec![], vec![], HashMap::new())
-    };
-
-    let covariance = CovarianceMatrix {
-        columns: col_order.to_vec(),
-        matrix: cov_flat,
-    };
-
-    let correlation = CorrelationMatrix {
-        columns: col_order.to_vec(),
-        matrix: corr_matrix,
-    };
-
-    // Eigendecomposition of the symmetric covariance matrix via faer.
-    let eigen = if m >= 2 {
-        let cov_faer = Mat::from_fn(m, m, |i, j| covariance.get(i, j));
-        match cov_faer.self_adjoint_eigen(faer::Side::Lower) {
-            Ok(decomp) => {
-                let u_mat = decomp.U();
-                let s_diag = decomp.S();
-
-                // Eigenvalues are in nondecreasing order; reverse to descending.
-                let mut eigenvalues = vec![0.0f64; m];
-                let mut vt_flat = vec![0.0f64; m * m];
-
-                for i in 0..m {
-                    let ri = m - 1 - i; // reversed index
-                    eigenvalues[i] = s_diag.column_vector()[ri].max(0.0);
-                    for j in 0..m {
-                        // Eigenvectors are columns of U; store as rows of Vᵀ (reversed order).
-                        vt_flat[i * m + j] = u_mat[(j, ri)];
-                    }
-                }
-
-                Some(EigenDecomposition {
-                    columns: col_order.to_vec(),
-                    eigenvalues,
-                    eigenvectors: vt_flat,
-                })
-            }
-            Err(_) => None,
-        }
-    } else {
-        None
-    };
-
-    PrecomputedStats {
-        means,
-        variances,
-        skewness: skewness_map,
-        entropy: entropy_map,
-        quantiles: quantiles_map,
-        sparsity: sparsity_map,
-        covariance,
-        correlation,
-        eigen,
-    }
+struct PrecomputedStats {
+    covariance: CovarianceMatrix,
+    eigen: Option<EigenDecomposition>,
 }
 
+// ---------------------------------------------------------------------------
+// Dataset
+// ---------------------------------------------------------------------------
+
 pub struct Dataset {
-    /// Column name → f64 data.
+    /// Raw column values (used for on-demand per-column stats).
     columns: HashMap<String, Vec<f64>>,
-    /// Column names in original order.
+    /// In-memory DuckDB copy used for SQL-native on-demand stats.
+    conn: Connection,
     col_order: Vec<String>,
-    /// Number of rows.
     nrows: usize,
-    /// Precomputed stats.
     stats: PrecomputedStats,
 }
 
+// ---------------------------------------------------------------------------
+// Helpers shared by both construction paths
+// ---------------------------------------------------------------------------
+
+/// SQL-quote a column name.
+fn q(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Eigendecomposition of a symmetric m×m correlation matrix (flat row-major).
+/// Computed from a covariance matrix. Returns eigenvalues/eigenvectors in descending eigenvalue order.
+fn compute_eigen_from_correlation(cov: &[f64], col_order: &[String]) -> Option<EigenDecomposition> {
+    let m = col_order.len();
+    if m < 2 {
+        return None;
+    }
+
+    // Convert covariance to correlation
+    let mut corr_flat = vec![0.0f64; m * m];
+    for i in 0..m {
+        corr_flat[i * m + i] = 1.0;
+        for j in (i + 1)..m {
+            let denom = (cov[i * m + i] * cov[j * m + j]).sqrt();
+            let r = if denom == 0.0 { 0.0 } else { cov[i * m + j] / denom };
+            corr_flat[i * m + j] = r;
+            corr_flat[j * m + i] = r;
+        }
+    }
+
+    // Eigendecompose correlation matrix
+    let corr_faer = Mat::from_fn(m, m, |i, j| corr_flat[i * m + j]);
+    let decomp = corr_faer.self_adjoint_eigen(faer::Side::Lower).ok()?;
+    let u = decomp.U();
+    let s = decomp.S();
+    // faer returns eigenvalues in nondecreasing order; reverse to descending.
+    let mut eigenvalues = vec![0.0f64; m];
+    let mut eigenvectors = vec![0.0f64; m * m];
+    for i in 0..m {
+        let ri = m - 1 - i;
+        eigenvalues[i] = s.column_vector()[ri].max(0.0);
+        for j in 0..m {
+            eigenvectors[i * m + j] = u[(j, ri)];
+        }
+    }
+    Some(EigenDecomposition { columns: col_order.to_vec(), eigenvalues, eigenvectors })
+}
+
+/// Pearson correlation matrix derived from a flat row-major covariance matrix.
+fn correlation_from_cov(cov: &[f64], col_order: &[String]) -> CorrelationMatrix {
+    let m = col_order.len();
+    let mut matrix = vec![vec![0.0f64; m]; m];
+    for i in 0..m {
+        matrix[i][i] = 1.0;
+        for j in (i + 1)..m {
+            let denom = (cov[i * m + i] * cov[j * m + j]).sqrt();
+            let r = if denom == 0.0 { 0.0 } else { cov[i * m + j] / denom };
+            matrix[i][j] = r;
+            matrix[j][i] = r;
+        }
+    }
+    CorrelationMatrix { columns: col_order.to_vec(), matrix }
+}
+
+// ---------------------------------------------------------------------------
+// from_csv — DuckDB ingestion path
+// ---------------------------------------------------------------------------
+
+/// Returns the names of numeric columns from table `data`, in schema order.
+fn numeric_columns(conn: &Connection) -> Result<Vec<String>, ProfilingError> {
+    let mut stmt = conn.prepare(
+        "SELECT column_name, data_type FROM information_schema.columns \
+         WHERE table_name = 'data' ORDER BY ordinal_position",
+    )?;
+    let pairs = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    Ok(pairs
+        .filter_map(|r| r.ok())
+        .filter(|(_, t)| {
+            let u = t.to_uppercase();
+            u.contains("INT") || u.contains("DOUBLE") || u.contains("FLOAT")
+                || u.contains("REAL") || u.contains("DECIMAL") || u.contains("NUMERIC")
+        })
+        .map(|(n, _)| n)
+        .collect())
+}
+
+/// Single-scan query: upper-triangle covariance via COVAR_SAMP, mirrored to full m×m flat matrix.
+fn query_covariance(
+    conn: &Connection,
+    col_order: &[String],
+) -> Result<Vec<f64>, ProfilingError> {
+    let m = col_order.len();
+    let mut parts = Vec::with_capacity(m * (m + 1) / 2);
+    let mut positions: Vec<(usize, usize)> = Vec::with_capacity(m * (m + 1) / 2);
+    for i in 0..m {
+        for j in i..m {
+            parts.push(format!(
+                "COVAR_SAMP({}, {})",
+                q(&col_order[i]),
+                q(&col_order[j])
+            ));
+            positions.push((i, j));
+        }
+    }
+    let sql = format!("SELECT {} FROM data", parts.join(", "));
+
+    conn.query_row(&sql, [], |row| {
+        let mut flat = vec![0.0f64; m * m];
+        for (idx, &(i, j)) in positions.iter().enumerate() {
+            let v: f64 = row.get::<_, Option<f64>>(idx)?.unwrap_or(0.0);
+            flat[i * m + j] = v;
+            flat[j * m + i] = v;
+        }
+        Ok(flat)
+    })
+    .map_err(Into::into)
+}
+
+/// Fetch all numeric column values in one query (needed for entropy).
+fn fetch_raw_columns(
+    conn: &Connection,
+    col_order: &[String],
+    nrows: usize,
+) -> Result<HashMap<String, Vec<f64>>, ProfilingError> {
+    if col_order.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let select = col_order
+        .iter()
+        .map(|n| format!("{}::DOUBLE", q(n)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!("SELECT {select} FROM data");
+    let mut stmt = conn.prepare(&sql)?;
+    let mut columns: HashMap<String, Vec<f64>> = col_order
+        .iter()
+        .map(|n| (n.clone(), Vec::with_capacity(nrows)))
+        .collect();
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        for (i, name) in col_order.iter().enumerate() {
+            let v: f64 = row.get::<_, Option<f64>>(i)?.unwrap_or(0.0);
+            columns.get_mut(name).unwrap().push(v);
+        }
+    }
+    Ok(columns)
+}
+
+/// Load a HashMap of columns into an in-memory DuckDB table.
+fn load_columns_to_duckdb(
+    conn: &Connection,
+    col_order: &[String],
+    columns: &HashMap<String, Vec<f64>>,
+    nrows: usize,
+) -> Result<(), ProfilingError> {
+    if col_order.is_empty() || nrows == 0 {
+        return Ok(());
+    }
+    // Create table with one DOUBLE column per key.
+    let col_defs = col_order
+        .iter()
+        .map(|n| format!("{} DOUBLE", q(n)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    conn.execute_batch(&format!("CREATE TABLE data ({col_defs})"))?;
+
+    // Insert all rows via a prepared statement.
+    let placeholders = col_order.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+    let insert_sql = format!("INSERT INTO data VALUES ({placeholders})");
+    let mut stmt = conn.prepare(&insert_sql)?;
+    for i in 0..nrows {
+        let params: Vec<duckdb::types::Value> = col_order
+            .iter()
+            .map(|n| duckdb::types::Value::Double(columns[n][i]))
+            .collect();
+        stmt.execute(duckdb::params_from_iter(params.iter()))?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Dataset implementation
+// ---------------------------------------------------------------------------
+
 impl Dataset {
+    /// Load a CSV using DuckDB and precompute covariance/PCA from SQL aggregates.
     pub fn from_csv<P: AsRef<Path>>(path: P) -> Result<Self, ProfilingError> {
-        let csv_path = path.as_ref();
-        let parquet_path = csv_path.with_extension("parquet");
+        let conn = Connection::open_in_memory()?;
+        let path_str = path.as_ref().display().to_string().replace('\'', "''");
+        conn.execute_batch(&format!(
+            "CREATE TABLE data AS SELECT * FROM read_csv_auto('{path_str}')"
+        ))?;
 
-        // Use duckdb CLI to convert CSV → Parquet.
-        let query = format!(
-            "COPY (SELECT * FROM read_csv_auto('{}')) TO '{}' (FORMAT PARQUET);",
-            csv_path.display(),
-            parquet_path.display(),
-        );
-        let output = Command::new("duckdb")
-            .args(["-c", &query])
-            .output()?;
+        let col_order = numeric_columns(&conn)?;
+        let nrows: usize = conn.query_row(
+            "SELECT COUNT(*) FROM data",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ProfilingError::DuckDb(stderr.into_owned()));
+        if col_order.is_empty() || nrows == 0 {
+            return Ok(Self {
+                columns: HashMap::new(),
+                conn,
+                col_order: vec![],
+                nrows,
+                stats: PrecomputedStats {
+                    covariance: CovarianceMatrix { columns: vec![], matrix: vec![] },
+                    eigen: None,
+                },
+            });
         }
 
-        // Read the Parquet file via arrow.
-        let file = std::fs::File::open(&parquet_path)?;
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
-        let reader = builder.build()?;
+        let columns = fetch_raw_columns(&conn, &col_order, nrows)?;
+        let cov_flat = query_covariance(&conn, &col_order)?;
 
-        let mut headers: Vec<String> = Vec::new();
-        let mut columns: HashMap<String, Vec<f64>> = HashMap::new();
-        let mut headers_set = false;
-
-        for batch in reader {
-            let batch = batch?;
-            if !headers_set {
-                headers = batch
-                    .schema()
-                    .fields()
-                    .iter()
-                    .map(|f| f.name().clone())
-                    .collect();
-                for name in &headers {
-                    columns.insert(name.clone(), Vec::new());
-                }
-                headers_set = true;
-            }
-
-            for (j, name) in headers.iter().enumerate() {
-                let col = batch.column(j);
-                // Try to downcast to Float64; fall back to casting.
-                let f64_arr = col
-                    .as_primitive_opt::<Float64Type>()
-                    .cloned()
-                    .or_else(|| {
-                        arrow::compute::cast(col, &arrow::datatypes::DataType::Float64)
-                            .ok()
-                            .and_then(|a| a.as_primitive_opt::<Float64Type>().cloned())
-                    });
-
-                if let Some(arr) = f64_arr {
-                    let vals = columns.get_mut(name).unwrap();
-                    for i in 0..arr.len() {
-                        vals.push(if arr.is_null(i) { 0.0 } else { arr.value(i) });
-                    }
-                } else {
-                    // Non-numeric column: push zeros.
-                    let vals = columns.get_mut(name).unwrap();
-                    vals.resize(vals.len() + batch.num_rows(), 0.0);
-                }
-            }
-        }
-
-        // Clean up temporary parquet file.
-        let _ = std::fs::remove_file(&parquet_path);
-
-        let nrows = columns.values().next().map_or(0, |v| v.len());
-        let stats = precompute(&headers, &columns, nrows);
+        let covariance = CovarianceMatrix { columns: col_order.clone(), matrix: cov_flat.clone() };
+        let eigen = compute_eigen_from_correlation(&cov_flat, &col_order);
 
         Ok(Self {
             columns,
-            col_order: headers,
+            conn,
+            col_order,
             nrows,
-            stats,
+            stats: PrecomputedStats {
+                covariance,
+                eigen,
+            },
         })
     }
 
-    /// Build a Dataset from pre-built column data (for tests / benches).
+    /// Build a Dataset from pre-built column data (for tests and benchmarks).
+    /// Uses the same hybrid path as from_csv for consistent results.
     pub fn from_columns(col_order: Vec<String>, columns: HashMap<String, Vec<f64>>) -> Self {
         let nrows = columns.values().next().map_or(0, |v| v.len());
 
-        let stats = precompute(&col_order, &columns, nrows);
+        let conn = Connection::open_in_memory().expect("DuckDB in-memory open failed");
+        load_columns_to_duckdb(&conn, &col_order, &columns, nrows)
+            .expect("failed to load columns into DuckDB");
+
+        let cov_flat = query_covariance(&conn, &col_order)
+            .expect("DuckDB covariance failed");
+
+        let covariance = CovarianceMatrix { columns: col_order.clone(), matrix: cov_flat.clone() };
+        let eigen = compute_eigen_from_correlation(&cov_flat, &col_order);
 
         Self {
             columns,
+            conn,
             col_order,
             nrows,
-            stats,
+            stats: PrecomputedStats {
+                covariance,
+                eigen,
+            },
         }
     }
 
@@ -369,50 +371,55 @@ impl Dataset {
             .collect()
     }
 
-    // --- Numeric (cached) ---
+    // --- Numeric (on demand) ---
 
     pub fn mean(&self, column: &str) -> Result<f64, ProfilingError> {
-        self.stats
-            .means
-            .get(column)
-            .copied()
-            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
+        self.get_column(column)?;
+        let c = q(column);
+        let sql = format!("SELECT AVG({c}) FROM data");
+        let v: Option<f64> = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(v.unwrap_or(0.0))
     }
 
     pub fn variance(&self, column: &str) -> Result<f64, ProfilingError> {
-        self.stats
-            .variances
-            .get(column)
-            .copied()
-            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
+        self.get_column(column)?;
+        let c = q(column);
+        let sql = format!("SELECT VAR_SAMP({c}) FROM data");
+        let v: Option<f64> = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(v.unwrap_or(0.0))
     }
 
     pub fn quantiles(&self, column: &str) -> Result<Quantiles, ProfilingError> {
-        self.stats
-            .quantiles
-            .get(column)
-            .cloned()
-            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
+        self.get_column(column)?;
+        let c = q(column);
+        let sql = format!(
+            "SELECT MIN({c}), QUANTILE_CONT({c}, 0.25), QUANTILE_CONT({c}, 0.5), QUANTILE_CONT({c}, 0.75), MAX({c}) FROM data"
+        );
+        self.conn.query_row(&sql, [], |row| {
+            let min: f64 = row.get::<_, Option<f64>>(0)?.unwrap_or(0.0);
+            let q25: f64 = row.get::<_, Option<f64>>(1)?.unwrap_or(min);
+            let q50: f64 = row.get::<_, Option<f64>>(2)?.unwrap_or(min);
+            let q75: f64 = row.get::<_, Option<f64>>(3)?.unwrap_or(min);
+            let max: f64 = row.get::<_, Option<f64>>(4)?.unwrap_or(min);
+            Ok(Quantiles { min, q25, q50, q75, max })
+        }).map_err(Into::into)
     }
 
-    // --- Distribution (cached) ---
+    // --- Distribution (on demand) ---
 
     pub fn skewness(&self, column: &str) -> Result<f64, ProfilingError> {
-        self.stats
-            .skewness
-            .get(column)
-            .copied()
-            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
+        self.get_column(column)?;
+        let c = q(column);
+        let sql = format!("SELECT SKEWNESS({c}) FROM data");
+        let v: Option<f64> = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(v.unwrap_or(0.0))
     }
 
-    // --- Entropy (cached) ---
+    // --- Entropy (on demand) ---
 
     pub fn entropy(&self, column: &str) -> Result<f64, ProfilingError> {
-        self.stats
-            .entropy
-            .get(column)
-            .copied()
-            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
+        let vals = self.get_column(column)?;
+        profiling::entropy::entropy_numeric(vals)
     }
 
     // --- Covariance (cached) ---
@@ -421,10 +428,10 @@ impl Dataset {
         Ok(self.stats.covariance.clone())
     }
 
-    // --- Correlation (cached) ---
+    // --- Correlation (derived from cached covariance) ---
 
     pub fn correlation_matrix(&self) -> Result<CorrelationMatrix, ProfilingError> {
-        Ok(self.stats.correlation.clone())
+        Ok(correlation_from_cov(&self.stats.covariance.matrix, &self.col_order))
     }
 
     // --- Eigendecomposition (cached) ---
@@ -457,7 +464,6 @@ impl Dataset {
             cumulative_variance_ratio.push(cumsum);
         }
 
-        // Each row of eigenvectors is a principal component (eigenvector of covariance matrix).
         let mut components = Vec::with_capacity(k * m);
         for i in 0..k {
             for j in 0..m {
@@ -478,69 +484,92 @@ impl Dataset {
     // --- Sparsity ---
 
     pub fn sparsity(&self, column: &str) -> Result<f64, ProfilingError> {
-        self.stats
-            .sparsity
-            .get(column)
-            .copied()
-            .ok_or_else(|| ProfilingError::ColumnNotFound(column.to_string()))
+        self.get_column(column)?;
+        if self.nrows == 0 {
+            return Err(ProfilingError::EmptyDataset);
+        }
+        let c = q(column);
+        let sql = format!("SELECT SUM(CASE WHEN {c} = 0.0 THEN 1 ELSE 0 END)::DOUBLE / {} FROM data", self.nrows);
+        let v: Option<f64> = self.conn.query_row(&sql, [], |r| r.get(0))?;
+        Ok(v.unwrap_or(0.0))
     }
 
-    // --- Reservoir Computing ---
+    // --- ML helpers ---
 
-    pub fn surrogate_test(
+    /// Build supervised-learning inputs from a target column.
+    ///
+    /// Returns the X design matrix (row-major) using all columns except
+    /// `target_column`, and y as the values of `target_column`.
+    pub fn design_matrix_and_target(
         &self,
-        column: &str,
-        num_surrogates: usize,
-    ) -> Result<profiling::reservoir::SurrogateTestResult, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::reservoir::surrogate_test(vals, num_surrogates)
-    }
+        target_column: &str,
+        prediction_type: PredictionType,
+    ) -> Result<SupervisedLearningData, ProfilingError> {
+        let y = self
+            .columns
+            .get(target_column)
+            .cloned()
+            .ok_or_else(|| ProfilingError::ColumnNotFound(target_column.to_string()))?;
 
-    pub fn bds_test(
-        &self,
-        column: &str,
-        embedding_dim: usize,
-        epsilon: f64,
-    ) -> Result<profiling::reservoir::BdsTestResult, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::reservoir::bds_test(vals, embedding_dim, epsilon)
-    }
+        if self.col_order.len() < 2 {
+            return Err(ProfilingError::NotEnoughColumns);
+        }
 
-    pub fn lyapunov_exponent(
-        &self,
-        column: &str,
-        embedding_dim: usize,
-        tau: usize,
-    ) -> Result<f64, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::reservoir::lyapunov_exponent(vals, embedding_dim, tau)
-    }
+        let feature_columns: Vec<String> = self
+            .col_order
+            .iter()
+            .filter(|name| name.as_str() != target_column)
+            .cloned()
+            .collect();
 
-    pub fn dependence_comparison(
-        &self,
-        column: &str,
-        max_lag: usize,
-    ) -> Result<profiling::reservoir::DependenceComparison, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::reservoir::dependence_comparison(vals, max_lag)
-    }
+        if feature_columns.is_empty() {
+            return Err(ProfilingError::NotEnoughColumns);
+        }
 
-    pub fn delay_embedding(
-        &self,
-        column: &str,
-        max_dim: usize,
-    ) -> Result<profiling::reservoir::DelayEmbedding, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::reservoir::delay_embedding(vals, max_dim)
-    }
+        match prediction_type {
+            PredictionType::Regression => {}
+            PredictionType::BinaryClassification => {
+                let mut labels = y.clone();
+                labels.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                labels.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+                if labels.len() != 2 {
+                    return Err(ProfilingError::InvalidPredictionTask(format!(
+                        "binary classification requires exactly 2 distinct target labels, found {}",
+                        labels.len()
+                    )));
+                }
+            }
+            PredictionType::MultiCategoryClassification => {
+                let mut labels = y.clone();
+                labels.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                labels.dedup_by(|a, b| (*a - *b).abs() < f64::EPSILON);
+                if labels.len() < 3 {
+                    return Err(ProfilingError::InvalidPredictionTask(format!(
+                        "multi-category classification requires at least 3 distinct target labels, found {}",
+                        labels.len()
+                    )));
+                }
+            }
+        }
 
-    pub fn memory_profile(
-        &self,
-        column: &str,
-        max_lag: usize,
-    ) -> Result<profiling::reservoir::MemoryProfile, ProfilingError> {
-        let vals = self.get_column(column)?;
-        profiling::reservoir::memory_profile(vals, max_lag)
+        let nrows = self.nrows;
+        let nfeatures = feature_columns.len();
+        let mut x = Vec::with_capacity(nrows * nfeatures);
+        for row in 0..nrows {
+            for name in &feature_columns {
+                x.push(self.columns[name][row]);
+            }
+        }
+
+        Ok(SupervisedLearningData {
+            prediction_type,
+            feature_columns,
+            target_column: target_column.to_string(),
+            nrows,
+            nfeatures,
+            x,
+            y,
+        })
     }
 
     // --- Helpers ---

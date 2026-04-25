@@ -3,7 +3,7 @@ use std::io::{self, BufRead, Write};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::dataset::Dataset;
+use crate::dataset::{Dataset, PredictionType};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC types
@@ -215,53 +215,13 @@ impl McpServer {
                 Ok(serde_json::to_string(&r).unwrap())
             }
 
-            // --- Reservoir: Surrogate test ---
-            "surrogate_test" => {
-                let c = get_str(args, "column")?;
-                let n = get_u64_or(args, "num_surrogates", 100) as usize;
-                let r = ds.surrogate_test(c, n).map_err(|e| e.to_string())?;
-                Ok(serde_json::to_string(&r).unwrap())
-            }
-
-            // --- Reservoir: BDS test ---
-            "bds_test" => {
-                let c = get_str(args, "column")?;
-                let dim = get_u64(args, "embedding_dim")? as usize;
-                let eps = get_f64(args, "epsilon")?;
-                let r = ds.bds_test(c, dim, eps).map_err(|e| e.to_string())?;
-                Ok(serde_json::to_string(&r).unwrap())
-            }
-
-            // --- Reservoir: Lyapunov exponent ---
-            "lyapunov_exponent" => {
-                let c = get_str(args, "column")?;
-                let dim = get_u64_or(args, "embedding_dim", 3) as usize;
-                let tau = get_u64_or(args, "tau", 1) as usize;
-                let v = ds.lyapunov_exponent(c, dim, tau).map_err(|e| e.to_string())?;
-                Ok(json!({"column": c, "lyapunov_exponent": v}).to_string())
-            }
-
-            // --- Reservoir: Dependence comparison ---
-            "dependence_comparison" => {
-                let c = get_str(args, "column")?;
-                let max_lag = get_u64_or(args, "max_lag", 10) as usize;
-                let r = ds.dependence_comparison(c, max_lag).map_err(|e| e.to_string())?;
-                Ok(serde_json::to_string(&r).unwrap())
-            }
-
-            // --- Reservoir: Delay embedding ---
-            "delay_embedding" => {
-                let c = get_str(args, "column")?;
-                let max_dim = get_u64_or(args, "max_dim", 10) as usize;
-                let r = ds.delay_embedding(c, max_dim).map_err(|e| e.to_string())?;
-                Ok(serde_json::to_string(&r).unwrap())
-            }
-
-            // --- Reservoir: Memory profile ---
-            "memory_profile" => {
-                let c = get_str(args, "column")?;
-                let max_lag = get_u64_or(args, "max_lag", 10) as usize;
-                let r = ds.memory_profile(c, max_lag).map_err(|e| e.to_string())?;
+            // --- Supervised ML split ---
+            "design_matrix_and_target" => {
+                let target_column = get_str(args, "target_column")?;
+                let prediction_type = get_prediction_type(args)?;
+                let r = ds
+                    .design_matrix_and_target(target_column, prediction_type)
+                    .map_err(|e| e.to_string())?;
                 Ok(serde_json::to_string(&r).unwrap())
             }
 
@@ -280,20 +240,16 @@ fn get_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
         .ok_or_else(|| format!("Missing '{key}' parameter"))
 }
 
-fn get_u64(args: &Value, key: &str) -> Result<u64, String> {
-    args.get(key)
-        .and_then(|v| v.as_u64())
-        .ok_or_else(|| format!("Missing '{key}' parameter"))
-}
-
-fn get_f64(args: &Value, key: &str) -> Result<f64, String> {
-    args.get(key)
-        .and_then(|v| v.as_f64())
-        .ok_or_else(|| format!("Missing '{key}' parameter"))
-}
-
-fn get_u64_or(args: &Value, key: &str, default: u64) -> u64 {
-    args.get(key).and_then(|v| v.as_u64()).unwrap_or(default)
+fn get_prediction_type(args: &Value) -> Result<PredictionType, String> {
+    let raw = get_str(args, "prediction_type")?;
+    match raw {
+        "regression" => Ok(PredictionType::Regression),
+        "binary_classification" => Ok(PredictionType::BinaryClassification),
+        "multi_category" => Ok(PredictionType::MultiCategoryClassification),
+        _ => Err(format!(
+            "Invalid 'prediction_type': {raw}. Expected one of: regression, binary_classification, multi_category"
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -415,77 +371,19 @@ fn tools_schema() -> Value {
             }
         },
         {
-            "name": "surrogate_test",
-            "description": "Surrogate data test for nonlinearity. Compares the time-reversal asymmetry of the real series against AR(1) surrogates. A |z_score| > 2 indicates nonlinear structure, useful for assessing reservoir computing suitability.",
+            "name": "design_matrix_and_target",
+            "description": "Build supervised-learning inputs by selecting one target column and using the remaining columns as the X design matrix.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "column": { "type": "string", "description": "Numeric column name" },
-                    "num_surrogates": { "type": "integer", "description": "Number of surrogate series to generate (default: 100)", "default": 100 }
+                    "target_column": { "type": "string", "description": "Column to use as the y target vector" },
+                    "prediction_type": {
+                        "type": "string",
+                        "description": "Prediction task type",
+                        "enum": ["regression", "binary_classification", "multi_category"]
+                    }
                 },
-                "required": ["column"]
-            }
-        },
-        {
-            "name": "bds_test",
-            "description": "BDS test for nonlinear serial dependence. Tests H₀: the series is i.i.d. A p_value < 0.05 indicates nonlinear temporal dynamics.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Numeric column name" },
-                    "embedding_dim": { "type": "integer", "description": "Embedding dimension (≥ 2)" },
-                    "epsilon": { "type": "number", "description": "Distance threshold (typically 0.5–2× the series std dev)" }
-                },
-                "required": ["column", "embedding_dim", "epsilon"]
-            }
-        },
-        {
-            "name": "lyapunov_exponent",
-            "description": "Estimate the largest Lyapunov exponent (Rosenstein's method). Positive values indicate chaotic dynamics, favourable for reservoir computing.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Numeric column name" },
-                    "embedding_dim": { "type": "integer", "description": "Embedding dimension (default: 3)", "default": 3 },
-                    "tau": { "type": "integer", "description": "Time delay (default: 1)", "default": 1 }
-                },
-                "required": ["column"]
-            }
-        },
-        {
-            "name": "dependence_comparison",
-            "description": "Compare linear (autocorrelation) and nonlinear (mutual information) dependence across lags. Flags nonlinear_dominance when MI substantially exceeds the Gaussian-equivalent MI.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Numeric column name" },
-                    "max_lag": { "type": "integer", "description": "Maximum lag to compute (default: 10)", "default": 10 }
-                },
-                "required": ["column"]
-            }
-        },
-        {
-            "name": "delay_embedding",
-            "description": "Estimate optimal delay (via AMI first minimum) and embedding dimension (via false nearest neighbours) for Takens' time-delay reconstruction.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Numeric column name" },
-                    "max_dim": { "type": "integer", "description": "Maximum dimension to test (default: 10)", "default": 10 }
-                },
-                "required": ["column"]
-            }
-        },
-        {
-            "name": "memory_profile",
-            "description": "Temporal memory profile: partial autocorrelations (PACF), delay mutual information, active information storage, and estimated memory length.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "column": { "type": "string", "description": "Numeric column name" },
-                    "max_lag": { "type": "integer", "description": "Maximum lag to compute (default: 10)", "default": 10 }
-                },
-                "required": ["column"]
+                "required": ["target_column", "prediction_type"]
             }
         }
     ])

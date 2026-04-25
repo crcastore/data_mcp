@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use mcp::dataset::Dataset;
+use mcp::dataset::{Dataset, PredictionType};
 
 fn sample_ds() -> Dataset {
     let order = vec!["id".into(), "age".into(), "income".into(), "score".into()];
@@ -95,70 +95,77 @@ fn test_sparsity_score() {
     assert!((sample_ds().sparsity("score").unwrap() - 0.4).abs() < 1e-10);
 }
 
-// ---------------------------------------------------------------------------
-// Reservoir computing diagnostics — uses a chaotic logistic map series
-// ---------------------------------------------------------------------------
+#[test]
+fn test_design_matrix_and_target_shapes_and_columns() {
+    let ds = sample_ds();
+    let sl = ds.design_matrix_and_target("score", PredictionType::Regression).unwrap();
 
-fn reservoir_ds() -> Dataset {
-    let n = 2000;
-    let mut x = vec![0.0f64; n];
-    x[0] = 0.1;
-    let r = 3.9;
-    for i in 1..n {
-        x[i] = r * x[i - 1] * (1.0 - x[i - 1]);
-    }
+    assert_eq!(sl.prediction_type, PredictionType::Regression);
+    assert_eq!(sl.target_column, "score");
+    assert_eq!(sl.feature_columns, vec!["id", "age", "income"]);
+    assert_eq!(sl.nrows, 10);
+    assert_eq!(sl.nfeatures, 3);
+    assert_eq!(sl.x.len(), sl.nrows * sl.nfeatures);
+    assert_eq!(sl.y.len(), sl.nrows);
+}
+
+#[test]
+fn test_design_matrix_and_target_values_row_major() {
+    let ds = sample_ds();
+    let sl = ds.design_matrix_and_target("score", PredictionType::Regression).unwrap();
+
+    // First row in feature order [id, age, income].
+    assert!((sl.x[0] - 1.0).abs() < 1e-10);
+    assert!((sl.x[1] - 25.0).abs() < 1e-10);
+    assert!((sl.x[2] - 50000.0).abs() < 1e-10);
+
+    // y should be the score column.
+    assert!((sl.y[0] - 85.5).abs() < 1e-10);
+    assert!((sl.y[2] - 0.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_design_matrix_and_target_missing_target() {
+    let ds = sample_ds();
+    assert!(ds
+        .design_matrix_and_target("missing", PredictionType::Regression)
+        .is_err());
+}
+
+#[test]
+fn test_design_matrix_binary_classification_validation() {
+    let order = vec!["f1".into(), "target".into()];
     let mut cols = HashMap::new();
-    cols.insert("signal".to_string(), x);
-    Dataset::from_columns(vec!["signal".into()], cols)
+    cols.insert("f1".to_string(), vec![1.0, 2.0, 3.0, 4.0]);
+    cols.insert("target".to_string(), vec![0.0, 1.0, 0.0, 1.0]);
+    let ds = Dataset::from_columns(order, cols);
+    assert!(ds
+        .design_matrix_and_target("target", PredictionType::BinaryClassification)
+        .is_ok());
 }
 
 #[test]
-fn test_surrogate_test_via_dataset() {
-    let ds = reservoir_ds();
-    let result = ds.surrogate_test("signal", 50).unwrap();
-    assert!(result.z_score.abs() > 2.0, "logistic map should be nonlinear");
-    assert!(result.is_nonlinear);
+fn test_design_matrix_multiclass_validation() {
+    let order = vec!["f1".into(), "target".into()];
+    let mut cols = HashMap::new();
+    cols.insert("f1".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    cols.insert("target".to_string(), vec![0.0, 1.0, 2.0, 1.0, 2.0]);
+    let ds = Dataset::from_columns(order, cols);
+    assert!(ds
+        .design_matrix_and_target("target", PredictionType::MultiCategoryClassification)
+        .is_ok());
 }
 
 #[test]
-fn test_bds_test_via_dataset() {
-    let ds = reservoir_ds();
-    let result = ds.bds_test("signal", 3, 0.5).unwrap();
-    assert!(result.p_value < 0.05, "logistic map should reject i.i.d. null");
-    assert!(result.statistic.is_finite());
+fn test_design_matrix_binary_rejects_nonbinary_target() {
+    let order = vec!["f1".into(), "target".into()];
+    let mut cols = HashMap::new();
+    cols.insert("f1".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    cols.insert("target".to_string(), vec![0.0, 1.0, 2.0, 1.0, 2.0]);
+    let ds = Dataset::from_columns(order, cols);
+    assert!(ds
+        .design_matrix_and_target("target", PredictionType::BinaryClassification)
+        .is_err());
 }
 
-#[test]
-fn test_lyapunov_via_dataset() {
-    let ds = reservoir_ds();
-    let l = ds.lyapunov_exponent("signal", 3, 1).unwrap();
-    assert!(l > 0.0, "chaotic series should have positive Lyapunov exponent, got {l}");
-}
 
-#[test]
-fn test_dependence_comparison_via_dataset() {
-    let ds = reservoir_ds();
-    let result = ds.dependence_comparison("signal", 5).unwrap();
-    assert_eq!(result.autocorrelations.len(), 5);
-    assert_eq!(result.mutual_informations.len(), 5);
-    for mi in &result.mutual_informations {
-        assert!(*mi >= 0.0);
-    }
-}
-
-#[test]
-fn test_delay_embedding_via_dataset() {
-    let ds = reservoir_ds();
-    let result = ds.delay_embedding("signal", 10).unwrap();
-    assert!(result.optimal_delay >= 1);
-    assert!(result.embedding_dimension >= 1 && result.embedding_dimension <= 10);
-}
-
-#[test]
-fn test_memory_profile_via_dataset() {
-    let ds = reservoir_ds();
-    let result = ds.memory_profile("signal", 10).unwrap();
-    assert_eq!(result.partial_autocorrelations.len(), 10);
-    assert_eq!(result.delay_mutual_informations.len(), 10);
-    assert!(result.active_information_storage > 0.0);
-}
