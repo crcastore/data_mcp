@@ -31,24 +31,22 @@ struct PrecomputedStats {
     covariance: CovarianceMatrix,
     /// Pearson correlation matrix.
     correlation: CorrelationMatrix,
-    /// SVD of the covariance matrix.
-    svd: Option<SvdDecomposition>,
+    /// Eigendecomposition of the covariance matrix.
+    eigen: Option<EigenDecomposition>,
 }
 
-/// SVD decomposition of the covariance matrix (A = U S Vᵀ).
+/// Eigendecomposition of the covariance matrix (A = Q Λ Qᵀ).
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct SvdDecomposition {
+pub struct EigenDecomposition {
     /// Column names corresponding to the matrix axes.
     pub columns: Vec<String>,
-    /// Singular values in descending order (length m).
-    pub singular_values: Vec<f64>,
-    /// Left singular vectors U, flat row-major m×m.
-    pub u: Vec<f64>,
-    /// Right singular vectors Vᵀ, flat row-major m×m.
-    pub vt: Vec<f64>,
+    /// Eigenvalues in descending order (length m).
+    pub eigenvalues: Vec<f64>,
+    /// Eigenvectors as rows, flat row-major m×m (each row is a principal axis).
+    pub eigenvectors: Vec<f64>,
 }
 
-/// PCA result derived from SVD of the covariance matrix.
+/// PCA result derived from the eigendecomposition of the covariance matrix.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PcaResult {
     /// Original column names.
@@ -201,7 +199,7 @@ fn precompute(
     };
 
     // Eigendecomposition of the symmetric covariance matrix via faer.
-    let svd = if m >= 2 {
+    let eigen = if m >= 2 {
         let cov_faer = Mat::from_fn(m, m, |i, j| covariance.get(i, j));
         match cov_faer.self_adjoint_eigen(faer::Side::Lower) {
             Ok(decomp) => {
@@ -221,11 +219,10 @@ fn precompute(
                     }
                 }
 
-                Some(SvdDecomposition {
+                Some(EigenDecomposition {
                     columns: col_order.to_vec(),
-                    singular_values: eigenvalues,
-                    u: vt_flat.clone(),
-                    vt: vt_flat,
+                    eigenvalues,
+                    eigenvectors: vt_flat,
                 })
             }
             Err(_) => None,
@@ -243,7 +240,7 @@ fn precompute(
         sparsity: sparsity_map,
         covariance,
         correlation,
-        svd,
+        eigen,
     }
 }
 
@@ -430,24 +427,24 @@ impl Dataset {
         Ok(self.stats.correlation.clone())
     }
 
-    // --- SVD (cached) ---
+    // --- Eigendecomposition (cached) ---
 
-    pub fn svd(&self) -> Result<&SvdDecomposition, ProfilingError> {
+    pub fn eigen(&self) -> Result<&EigenDecomposition, ProfilingError> {
         self.stats
-            .svd
+            .eigen
             .as_ref()
             .ok_or(ProfilingError::NotEnoughColumns)
     }
 
-    // --- PCA (derived from cached SVD) ---
+    // --- PCA (derived from cached eigendecomposition) ---
 
     pub fn pca(&self, n_components: Option<usize>) -> Result<PcaResult, ProfilingError> {
-        let svd = self.svd()?;
-        let m = svd.columns.len();
+        let eigen = self.eigen()?;
+        let m = eigen.columns.len();
         let k = n_components.unwrap_or(m).min(m);
 
-        let total_var: f64 = svd.singular_values.iter().sum();
-        let explained_variance: Vec<f64> = svd.singular_values[..k].to_vec();
+        let total_var: f64 = eigen.eigenvalues.iter().sum();
+        let explained_variance: Vec<f64> = eigen.eigenvalues[..k].to_vec();
         let explained_variance_ratio: Vec<f64> = explained_variance
             .iter()
             .map(|&v| if total_var > 0.0 { v / total_var } else { 0.0 })
@@ -460,16 +457,16 @@ impl Dataset {
             cumulative_variance_ratio.push(cumsum);
         }
 
-        // Components are rows of Vᵀ (each row = eigenvector of covariance matrix).
+        // Each row of eigenvectors is a principal component (eigenvector of covariance matrix).
         let mut components = Vec::with_capacity(k * m);
         for i in 0..k {
             for j in 0..m {
-                components.push(svd.vt[i * m + j]);
+                components.push(eigen.eigenvectors[i * m + j]);
             }
         }
 
         Ok(PcaResult {
-            columns: svd.columns.clone(),
+            columns: eigen.columns.clone(),
             n_components: k,
             explained_variance,
             explained_variance_ratio,

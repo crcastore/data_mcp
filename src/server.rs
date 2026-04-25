@@ -406,7 +406,7 @@ fn tools_schema() -> Value {
         },
         {
             "name": "pca",
-            "description": "Principal Component Analysis derived from the precomputed SVD of the covariance matrix. Returns eigenvalues, explained variance ratios, cumulative variance ratios, and principal component loadings.",
+            "description": "Principal Component Analysis derived from the eigendecomposition of the covariance matrix. Returns eigenvalues, explained variance ratios, cumulative variance ratios, and principal component loadings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
