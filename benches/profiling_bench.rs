@@ -25,7 +25,7 @@ fn build_dataset() -> Dataset {
         cols.insert(name, vals);
     }
 
-    Dataset::from_columns(order, cols)
+    Dataset::from_columns(order, cols, None)
 }
 
 // ---------------------------------------------------------------------------

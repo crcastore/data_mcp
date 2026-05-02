@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // With a CSV path → run the CLI profiler.
-    let ds = Dataset::from_csv(&args[1])?;
+    let ds = Dataset::from_csv(&args[1], None)?;
     println!("=== Dataset Profile ===");
     println!("Rows:    {}", ds.row_count());
     println!("Columns: {}", ds.column_count());

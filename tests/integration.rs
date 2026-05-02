@@ -9,7 +9,7 @@ fn sample_ds() -> Dataset {
     cols.insert("age".to_string(), vec![25.0, 30.0, 35.0, 25.0, 40.0, 31.0, 28.0, 33.0, 45.0, 22.0]);
     cols.insert("income".to_string(), vec![50000.0, 60000.0, 70000.0, 55000.0, 80000.0, 75000.0, 45000.0, 62000.0, 90000.0, 40000.0]);
     cols.insert("score".to_string(), vec![85.5, 90.0, 0.0, 78.5, 0.0, 92.0, 0.0, 88.5, 95.0, 0.0]);
-    Dataset::from_columns(order, cols)
+    Dataset::from_columns(order, cols, None)
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn test_design_matrix_binary_classification_validation() {
     let mut cols = HashMap::new();
     cols.insert("f1".to_string(), vec![1.0, 2.0, 3.0, 4.0]);
     cols.insert("target".to_string(), vec![0.0, 1.0, 0.0, 1.0]);
-    let ds = Dataset::from_columns(order, cols);
+    let ds = Dataset::from_columns(order, cols, None);
     assert!(ds
         .design_matrix_and_target("target", PredictionType::BinaryClassification)
         .is_ok());
@@ -150,7 +150,7 @@ fn test_design_matrix_multiclass_validation() {
     let mut cols = HashMap::new();
     cols.insert("f1".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     cols.insert("target".to_string(), vec![0.0, 1.0, 2.0, 1.0, 2.0]);
-    let ds = Dataset::from_columns(order, cols);
+    let ds = Dataset::from_columns(order, cols, None);
     assert!(ds
         .design_matrix_and_target("target", PredictionType::MultiCategoryClassification)
         .is_ok());
@@ -162,10 +162,77 @@ fn test_design_matrix_binary_rejects_nonbinary_target() {
     let mut cols = HashMap::new();
     cols.insert("f1".to_string(), vec![1.0, 2.0, 3.0, 4.0, 5.0]);
     cols.insert("target".to_string(), vec![0.0, 1.0, 2.0, 1.0, 2.0]);
-    let ds = Dataset::from_columns(order, cols);
+    let ds = Dataset::from_columns(order, cols, None);
     assert!(ds
         .design_matrix_and_target("target", PredictionType::BinaryClassification)
         .is_err());
+}
+
+// --- PCA Projection Tests ---
+
+#[test]
+fn test_project_onto_pca_shape() {
+    let ds = sample_ds();
+    let proj = ds.project_onto_pca(Some(2)).unwrap();
+    assert_eq!(proj.nrows, 10);
+    assert_eq!(proj.n_features, 4);
+    assert_eq!(proj.n_components, 2);
+    assert_eq!(proj.data.len(), 10 * 2);
+    assert_eq!(proj.component_names.len(), 2);
+}
+
+#[test]
+fn test_project_onto_pca_components() {
+    let ds = sample_ds();
+    let proj = ds.project_onto_pca(None).unwrap();
+    assert_eq!(proj.n_components, 4);
+    assert_eq!(proj.component_names, vec!["PC1", "PC2", "PC3", "PC4"]);
+}
+
+#[test]
+fn test_project_onto_pca_variance() {
+    let ds = sample_ds();
+    let proj = ds.project_onto_pca(None).unwrap();
+    assert_eq!(proj.explained_variance.len(), 4);
+    assert_eq!(proj.cumulative_variance_ratio.len(), 4);
+    // Cumulative should be monotonically increasing
+    for i in 1..proj.cumulative_variance_ratio.len() {
+        assert!(proj.cumulative_variance_ratio[i] >= proj.cumulative_variance_ratio[i - 1]);
+    }
+    // Should sum to ~1.0 (correlation-based)
+    assert!((proj.cumulative_variance_ratio[3] - 1.0).abs() < 1e-10);
+}
+
+// --- PCA Reconstruction Tests ---
+
+#[test]
+fn test_reconstruct_from_pca_shape() {
+    let ds = sample_ds();
+    let recon = ds.reconstruct_from_pca(Some(2)).unwrap();
+    assert_eq!(recon.nrows, 10);
+    assert_eq!(recon.n_features, 4);
+    assert_eq!(recon.n_components, 2);
+    assert_eq!(recon.data.len(), 10 * 4);
+    assert_eq!(recon.columns, vec!["id", "age", "income", "score"]);
+}
+
+#[test]
+fn test_reconstruct_from_pca_all_components() {
+    let ds = sample_ds();
+    let recon = ds.reconstruct_from_pca(None).unwrap();
+    assert_eq!(recon.n_components, 4);
+    // With all components, reconstruction should nearly recover original
+    assert!((recon.cumulative_variance_ratio - 1.0).abs() < 1e-10);
+}
+
+#[test]
+fn test_reconstruct_approximation() {
+    let ds = sample_ds();
+    // Reconstruct with fewer components should have lower variance ratio
+    let recon_2 = ds.reconstruct_from_pca(Some(2)).unwrap();
+    let recon_all = ds.reconstruct_from_pca(None).unwrap();
+    assert!(recon_2.cumulative_variance_ratio < recon_all.cumulative_variance_ratio);
+    assert!(recon_2.cumulative_variance_ratio <= 1.0);
 }
 
 

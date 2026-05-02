@@ -20,7 +20,7 @@ fn make_dataset(n: usize) -> Dataset {
     let mut cols = HashMap::new();
     cols.insert("val".to_string(), val);
     cols.insert("sparse".to_string(), sparse);
-    Dataset::from_columns(order, cols)
+    Dataset::from_columns(order, cols, None)
 }
 
 const SIZES: &[usize] = &[10, 1_000];

@@ -123,7 +123,8 @@ impl McpServer {
         // load_dataset needs &mut self — handle separately.
         if name == "load_dataset" {
             let path = get_str(args, "path")?;
-            let ds = Dataset::from_csv(path).map_err(|e| e.to_string())?;
+            let target_column = args.get("target_column").and_then(|v| v.as_str()).map(|s| s.to_string());
+            let ds = Dataset::from_csv(path, target_column).map_err(|e| e.to_string())?;
             let rows = ds.row_count();
             let cols = ds.column_count();
             self.dataset = Some(ds);
@@ -215,6 +216,20 @@ impl McpServer {
                 Ok(serde_json::to_string(&r).unwrap())
             }
 
+            // --- PCA Projection ---
+            "project_onto_pca" => {
+                let n = args.get("n_components").and_then(|v| v.as_u64()).map(|v| v as usize);
+                let r = ds.project_onto_pca(n).map_err(|e| e.to_string())?;
+                Ok(serde_json::to_string(&r).unwrap())
+            }
+
+            // --- PCA Reconstruction ---
+            "reconstruct_from_pca" => {
+                let n = args.get("n_components").and_then(|v| v.as_u64()).map(|v| v as usize);
+                let r = ds.reconstruct_from_pca(n).map_err(|e| e.to_string())?;
+                Ok(serde_json::to_string(&r).unwrap())
+            }
+
             // --- Supervised ML split ---
             "design_matrix_and_target" => {
                 let target_column = get_str(args, "target_column")?;
@@ -260,11 +275,12 @@ fn tools_schema() -> Value {
     json!([
         {
             "name": "load_dataset",
-            "description": "Load a CSV file into memory for profiling. Must be called before any other tool.",
+            "description": "Load a CSV file into memory for profiling. Must be called before any other tool. Optionally specify a target_column to exclude from profiling and PCA (used for supervised ML tasks).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Absolute path to the CSV file" }
+                    "path": { "type": "string", "description": "Absolute path to the CSV file" },
+                    "target_column": { "type": "string", "description": "Optional target column name to exclude from profiling/PCA" }
                 },
                 "required": ["path"]
             }
@@ -362,11 +378,31 @@ fn tools_schema() -> Value {
         },
         {
             "name": "pca",
-            "description": "Principal Component Analysis derived from the eigendecomposition of the covariance matrix. Returns eigenvalues, explained variance ratios, cumulative variance ratios, and principal component loadings.",
+            "description": "Principal Component Analysis derived from the eigendecomposition of the correlation matrix. Returns eigenvalues, explained variance ratios, cumulative variance ratios, and principal component loadings.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "n_components": { "type": "integer", "description": "Number of principal components to return (default: all)" }
+                }
+            }
+        },
+        {
+            "name": "project_onto_pca",
+            "description": "Project data onto the first n_components principal components, transforming the dataset into PCA coordinate space. Returns the projected data with component names and explained variance.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "n_components": { "type": "integer", "description": "Number of principal components to project onto (default: all)" }
+                }
+            }
+        },
+        {
+            "name": "reconstruct_from_pca",
+            "description": "Reconstruct the original features from the first n_components principal components. Returns an approximation of the original data in feature space.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "n_components": { "type": "integer", "description": "Number of principal components to use for reconstruction (default: all)" }
                 }
             }
         },

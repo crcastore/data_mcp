@@ -57,6 +57,42 @@ pub struct SupervisedLearningData {
     pub y: Vec<f64>,
 }
 
+/// PCA-projected dataset: original data transformed into principal component space.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PcaProjection {
+    /// Number of components used for projection.
+    pub n_components: usize,
+    /// Number of original features.
+    pub n_features: usize,
+    /// Number of samples.
+    pub nrows: usize,
+    /// Component names (PC1, PC2, ..., PCk).
+    pub component_names: Vec<String>,
+    /// Explained variance for each component (length n_components).
+    pub explained_variance: Vec<f64>,
+    /// Cumulative explained variance ratio (length n_components).
+    pub cumulative_variance_ratio: Vec<f64>,
+    /// Projected data: row-major layout, nrows × n_components.
+    pub data: Vec<f64>,
+}
+
+/// Reconstructed dataset: approximation from subset of PCA components.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PcaReconstruction {
+    /// Number of components used for reconstruction.
+    pub n_components: usize,
+    /// Original number of features.
+    pub n_features: usize,
+    /// Number of samples.
+    pub nrows: usize,
+    /// Original column names.
+    pub columns: Vec<String>,
+    /// Cumulative explained variance ratio from n_components.
+    pub cumulative_variance_ratio: f64,
+    /// Reconstructed data: row-major layout, nrows × n_features.
+    pub data: Vec<f64>,
+}
+
 /// Raw covariance matrix stored alongside column names.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CovarianceMatrix {
@@ -92,6 +128,9 @@ pub struct Dataset {
     conn: Connection,
     col_order: Vec<String>,
     nrows: usize,
+    /// Target column name (excluded from profiling/PCA, used only for supervised ML).
+    #[allow(dead_code)]
+    target_column: Option<String>,
     stats: PrecomputedStats,
 }
 
@@ -162,8 +201,8 @@ fn correlation_from_cov(cov: &[f64], col_order: &[String]) -> CorrelationMatrix 
 // from_csv — DuckDB ingestion path
 // ---------------------------------------------------------------------------
 
-/// Returns the names of numeric columns from table `data`, in schema order.
-fn numeric_columns(conn: &Connection) -> Result<Vec<String>, ProfilingError> {
+/// Returns the names of numeric columns from table `data`, in schema order, excluding target_column if specified.
+fn numeric_columns(conn: &Connection, exclude: Option<&str>) -> Result<Vec<String>, ProfilingError> {
     let mut stmt = conn.prepare(
         "SELECT column_name, data_type FROM information_schema.columns \
          WHERE table_name = 'data' ORDER BY ordinal_position",
@@ -173,7 +212,13 @@ fn numeric_columns(conn: &Connection) -> Result<Vec<String>, ProfilingError> {
     })?;
     Ok(pairs
         .filter_map(|r| r.ok())
-        .filter(|(_, t)| {
+        .filter(|(n, t)| {
+            // Exclude target column and non-numeric types
+            if let Some(ex) = exclude {
+                if n == ex {
+                    return false;
+                }
+            }
             let u = t.to_uppercase();
             u.contains("INT") || u.contains("DOUBLE") || u.contains("FLOAT")
                 || u.contains("REAL") || u.contains("DECIMAL") || u.contains("NUMERIC")
@@ -282,14 +327,15 @@ fn load_columns_to_duckdb(
 
 impl Dataset {
     /// Load a CSV using DuckDB and precompute covariance/PCA from SQL aggregates.
-    pub fn from_csv<P: AsRef<Path>>(path: P) -> Result<Self, ProfilingError> {
+    /// The target_column, if specified, is excluded from profiling and PCA.
+    pub fn from_csv<P: AsRef<Path>>(path: P, target_column: Option<String>) -> Result<Self, ProfilingError> {
         let conn = Connection::open_in_memory()?;
         let path_str = path.as_ref().display().to_string().replace('\'', "''");
         conn.execute_batch(&format!(
             "CREATE TABLE data AS SELECT * FROM read_csv_auto('{path_str}')"
         ))?;
 
-        let col_order = numeric_columns(&conn)?;
+        let col_order = numeric_columns(&conn, target_column.as_deref())?;
         let nrows: usize = conn.query_row(
             "SELECT COUNT(*) FROM data",
             [],
@@ -302,6 +348,7 @@ impl Dataset {
                 conn,
                 col_order: vec![],
                 nrows,
+                target_column,
                 stats: PrecomputedStats {
                     covariance: CovarianceMatrix { columns: vec![], matrix: vec![] },
                     eigen: None,
@@ -309,7 +356,15 @@ impl Dataset {
             });
         }
 
-        let columns = fetch_raw_columns(&conn, &col_order, nrows)?;
+        let columns = {
+            // Fetch feature columns + the target column (if any) so design_matrix_and_target can access it.
+            // col_order is feature-only (target excluded), so we temporarily extend it for fetching.
+            let mut fetch_cols = col_order.clone();
+            if let Some(ref target) = target_column {
+                fetch_cols.push(target.clone());
+            }
+            fetch_raw_columns(&conn, &fetch_cols, nrows)?
+        };
         let cov_flat = query_covariance(&conn, &col_order)?;
 
         let covariance = CovarianceMatrix { columns: col_order.clone(), matrix: cov_flat.clone() };
@@ -320,6 +375,7 @@ impl Dataset {
             conn,
             col_order,
             nrows,
+            target_column,
             stats: PrecomputedStats {
                 covariance,
                 eigen,
@@ -328,25 +384,41 @@ impl Dataset {
     }
 
     /// Build a Dataset from pre-built column data (for tests and benchmarks).
-    /// Uses the same hybrid path as from_csv for consistent results.
-    pub fn from_columns(col_order: Vec<String>, columns: HashMap<String, Vec<f64>>) -> Self {
+    /// The target_column, if specified, is excluded from profiling and PCA.
+    pub fn from_columns(col_order: Vec<String>, columns: HashMap<String, Vec<f64>>, target_column: Option<String>) -> Self {
         let nrows = columns.values().next().map_or(0, |v| v.len());
 
+        // Filter out target column from col_order for PCA/profiling
+        let feature_cols: Vec<String> = col_order
+            .iter()
+            .filter(|c| {
+                if let Some(ref target) = target_column {
+                    c.as_str() != target
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+
         let conn = Connection::open_in_memory().expect("DuckDB in-memory open failed");
+        // Load all columns (including target) into DuckDB for on-demand stats
         load_columns_to_duckdb(&conn, &col_order, &columns, nrows)
             .expect("failed to load columns into DuckDB");
 
-        let cov_flat = query_covariance(&conn, &col_order)
+        // Compute covariance only on feature columns (excluding target)
+        let cov_flat = query_covariance(&conn, &feature_cols)
             .expect("DuckDB covariance failed");
 
-        let covariance = CovarianceMatrix { columns: col_order.clone(), matrix: cov_flat.clone() };
-        let eigen = compute_eigen_from_correlation(&cov_flat, &col_order);
+        let covariance = CovarianceMatrix { columns: feature_cols.clone(), matrix: cov_flat.clone() };
+        let eigen = compute_eigen_from_correlation(&cov_flat, &feature_cols);
 
         Self {
             columns,
             conn,
-            col_order,
+            col_order: feature_cols,
             nrows,
+            target_column,
             stats: PrecomputedStats {
                 covariance,
                 eigen,
@@ -478,6 +550,162 @@ impl Dataset {
             explained_variance_ratio,
             cumulative_variance_ratio,
             components,
+        })
+    }
+
+    // --- PCA Projection: Transform data into PC space ---
+
+    /// Project all data onto the first n_components principal components.
+    ///
+    /// Returns a PcaProjection with data in PC coordinate space (nrows × n_components).
+    pub fn project_onto_pca(&self, n_components: Option<usize>) -> Result<PcaProjection, ProfilingError> {
+        let eigen = self.eigen()?;
+        let m = eigen.columns.len();
+        let k = n_components.unwrap_or(m).min(m);
+
+        // Compute explained variance info
+        let total_var: f64 = eigen.eigenvalues.iter().sum();
+        let explained_variance: Vec<f64> = eigen.eigenvalues[..k].to_vec();
+        let explained_variance_ratio: Vec<f64> = explained_variance
+            .iter()
+            .map(|&v| if total_var > 0.0 { v / total_var } else { 0.0 })
+            .collect();
+
+        let mut cumulative_variance_ratio = Vec::with_capacity(k);
+        let mut cumsum = 0.0;
+        for &r in &explained_variance_ratio {
+            cumsum += r;
+            cumulative_variance_ratio.push(cumsum);
+        }
+
+        // Standardize (z-score) each column for projection
+        let mut means = vec![0.0f64; m];
+        let mut stds = vec![0.0f64; m];
+
+        for j in 0..m {
+            let col_name = &eigen.columns[j];
+            if let Some(col_vals) = self.columns.get(col_name) {
+                let mean = col_vals.iter().sum::<f64>() / col_vals.len() as f64;
+                let var = col_vals.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / col_vals.len() as f64;
+                means[j] = mean;
+                stds[j] = var.sqrt();
+            }
+        }
+
+        // Project: for each row i and component j, compute dot product of standardized row with component
+        let mut data = Vec::with_capacity(self.nrows * k);
+        for i in 0..self.nrows {
+            for pc in 0..k {
+                let mut proj = 0.0f64;
+                for j in 0..m {
+                    let col_name = &eigen.columns[j];
+                    if let Some(col_vals) = self.columns.get(col_name) {
+                        let val = col_vals[i];
+                        let std_val = if stds[j] > 0.0 {
+                            (val - means[j]) / stds[j]
+                        } else {
+                            0.0
+                        };
+                        proj += std_val * eigen.eigenvectors[pc * m + j];
+                    }
+                }
+                data.push(proj);
+            }
+        }
+
+        let component_names: Vec<String> = (0..k)
+            .map(|i| format!("PC{}", i + 1))
+            .collect();
+
+        Ok(PcaProjection {
+            n_components: k,
+            n_features: m,
+            nrows: self.nrows,
+            component_names,
+            explained_variance,
+            cumulative_variance_ratio,
+            data,
+        })
+    }
+
+    // --- PCA Reconstruction: Inverse-transform from PC space ---
+
+    /// Reconstruct original features from the first n_components principal components.
+    ///
+    /// Returns a PcaReconstruction with approximated data in original feature space (nrows × n_features).
+    pub fn reconstruct_from_pca(&self, n_components: Option<usize>) -> Result<PcaReconstruction, ProfilingError> {
+        let eigen = self.eigen()?;
+        let m = eigen.columns.len();
+        let k = n_components.unwrap_or(m).min(m);
+
+        // Compute cumulative variance for the k components
+        let total_var: f64 = eigen.eigenvalues.iter().sum();
+        let cum_var: f64 = eigen.eigenvalues[..k]
+            .iter()
+            .map(|&v| if total_var > 0.0 { v / total_var } else { 0.0 })
+            .sum();
+
+        // Standardize each column
+        let mut means = vec![0.0f64; m];
+        let mut stds = vec![0.0f64; m];
+
+        for j in 0..m {
+            let col_name = &eigen.columns[j];
+            if let Some(col_vals) = self.columns.get(col_name) {
+                let mean = col_vals.iter().sum::<f64>() / col_vals.len() as f64;
+                let var = col_vals.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / col_vals.len() as f64;
+                means[j] = mean;
+                stds[j] = var.sqrt();
+            }
+        }
+
+        // Project to PC space, then reconstruct
+        let mut data = Vec::with_capacity(self.nrows * m);
+
+        for i in 0..self.nrows {
+            // First, project this row onto the first k components
+            let mut proj = vec![0.0f64; k];
+            for pc in 0..k {
+                for j in 0..m {
+                    let col_name = &eigen.columns[j];
+                    if let Some(col_vals) = self.columns.get(col_name) {
+                        let val = col_vals[i];
+                        let std_val = if stds[j] > 0.0 {
+                            (val - means[j]) / stds[j]
+                        } else {
+                            0.0
+                        };
+                        proj[pc] += std_val * eigen.eigenvectors[pc * m + j];
+                    }
+                }
+            }
+
+            // Reconstruct in standardized space using the k components
+            let mut reconstructed_std = vec![0.0f64; m];
+            for j in 0..m {
+                for pc in 0..k {
+                    reconstructed_std[j] += proj[pc] * eigen.eigenvectors[pc * m + j];
+                }
+            }
+
+            // Unstandardize back to original scale
+            for j in 0..m {
+                let original_scale = if stds[j] > 0.0 {
+                    reconstructed_std[j] * stds[j] + means[j]
+                } else {
+                    means[j]
+                };
+                data.push(original_scale);
+            }
+        }
+
+        Ok(PcaReconstruction {
+            n_components: k,
+            n_features: m,
+            nrows: self.nrows,
+            columns: eigen.columns.clone(),
+            cumulative_variance_ratio: cum_var,
+            data,
         })
     }
 
